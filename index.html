@@ -762,14 +762,42 @@
     /* ======================================================================
        VIEW 4 -- Batch Generator: back-schedules from a DTM + target date,
        expands a succession run of N waves at a fixed interval, previews it,
-       then either saves it via 'generate-planting-events' (if that action
+       then either saves it via 'add-planting-events' (if that action
        is deployed) or hands back a copyable JSON payload as a fallback.
        ====================================================================== */
+
+    /* Block-family grouping for the crop select -- CROP_REFERENCE.Default_Block_ID
+       (BLK-01..04, Z5) is the SAME field createCohort_ (Database.gs) actually
+       uses, so grouping off it here can't drift out of sync with the real
+       block assignments the way a hand-typed crop->block list would. Family
+       display names match the existing SVG block labels in ranch_aab.html's
+       spatial grid (BLOCK 1: SOLANACEAE, etc.) for consistency across both
+       apps. NOT a fixed sub-zone map -- a block's 55 beds rotate through
+       however many crops share that block (see CROP_ZONING_REFERENCE's
+       Cohort_Structure column), this is just "which block does this crop
+       usually go in," same as Default_Block_ID already means. */
+    var BLOCK_FAMILY_NAMES_ = {
+        'BLK-01': 'Block 1 \u2014 Solanaceae & Peppers',
+        'BLK-02': 'Block 2 \u2014 Fast Greens',
+        'BLK-03': 'Block 3 \u2014 Brassicas & Vine',
+        'BLK-04': 'Block 4 \u2014 Roots, Staples & Cover Crops',
+        'Z5': 'Zone 5 \u2014 Perennial'
+    };
     function populateBatchCropSelect_(){
         const sel = document.getElementById('batch-crop-select');
         const crops = (DATA && DATA.crop_reference) || [];
         if(!crops.length){ sel.innerHTML = '<option value="">No crop reference loaded</option>'; return; }
-        sel.innerHTML = crops.map(c => `<option value="${c.Crop_ID}">${c.Crop_Name} (${c.Crop_ID})</option>`).join('');
+        const byBlock = {};
+        const order = [];
+        crops.forEach(c => {
+            const key = c.Default_Block_ID || 'Unassigned';
+            if(!byBlock[key]){ byBlock[key] = []; order.push(key); }
+            byBlock[key].push(c);
+        });
+        sel.innerHTML = order.map(key => `
+            <optgroup label="${BLOCK_FAMILY_NAMES_[key] || key}">
+                ${byBlock[key].map(c => `<option value="${c.Crop_ID}">${c.Crop_Name} (${c.Crop_ID})</option>`).join('')}
+            </optgroup>`).join('');
         sel.onchange = () => {
             const crop = crops.find(c => c.Crop_ID === sel.value);
             if(crop && crop.Cycle_Days_Min){
