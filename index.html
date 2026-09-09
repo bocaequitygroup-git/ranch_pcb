@@ -515,6 +515,28 @@
         return null;
     }
 
+    /* ======================================================================
+       HOME-BLOCK MAPPING (2026-09-09) -- same fix as BedAllocationEngine.gs's
+       resolveCropHomeBedBlock_, kept as its own client-side copy for the same
+       reason facilityForBed_ already is: this must stay identical branch-for-
+       branch with the server-side version so a bed's candidacy reads the same
+       in both places. Target_Facility alone is a 4-value bucket (OPEN_FIELD
+       spans all of B1-B4, 220 beds) -- it was never enough to keep a crop in
+       its own rotation block. This resolves a crop's CROP_REFERENCE.
+       Default_Block_ID (BLK-0X namespace) to the real BED_MASTER block
+       (B1-B4/Z5) the same way createCohort_/cohortBlockIdForBed_ already do
+       server-side. Returns null for greenhouse/high-tunnel-only crops (no
+       BLK-0X code exists for those) -- callers fall back to facility-only
+       filtering for those, unchanged from before this pass.
+       ====================================================================== */
+    const COHORT_BLOCK_TO_BED_BLOCK_ = { 'BLK-01':'B1', 'BLK-02':'B2', 'BLK-03':'B3', 'BLK-04':'B4', 'Z5':'Z5' };
+    function resolveCropHomeBedBlock_(cropId){
+        const ref = (DATA && DATA.crop_reference) || [];
+        const crop = ref.find(c => c.Crop_ID === cropId);
+        if(!crop || !crop.Default_Block_ID) return null;
+        return COHORT_BLOCK_TO_BED_BLOCK_[String(crop.Default_Block_ID).toUpperCase()] || null;
+    }
+
     function cropName_(cropId){
         const ref = (DATA && DATA.crop_reference) || [];
         const hit = ref.find(c => c.Crop_ID === cropId);
@@ -593,14 +615,37 @@
 
     function candidateBedsForEvent_(e){
         const beds = (DATA && DATA.bed_master) || [];
-        return beds.filter(b => b.Current_State === 'Rest' && facilityForBed_(b) === e.Target_Facility);
+        const homeBlock = resolveCropHomeBedBlock_(e.Crop_ID);
+        return beds.filter(b => b.Current_State === 'Rest'
+            && facilityForBed_(b) === e.Target_Facility
+            && (!homeBlock || b.Block_ID === homeBlock))
+            .sort((a,b) => String(a.Bed_ID).localeCompare(String(b.Bed_ID)));
+    }
+
+    // BedsPerWave cap (2026-09-09) -- same column BedAllocationEngine.gs's
+    // getBedsPerWaveForEvent_ reads server-side (CROP_PLANTING_RULES,
+    // looked up via the event's Rule_ID). Returns null (uncapped) if the
+    // rule or the column is missing, never zero -- a missing cap must not
+    // silently block every selection.
+    function bedsPerWaveForEvent_(e){
+        const rules = (DATA && DATA.planting_rules) || [];
+        const rule = rules.find(r => r.Rule_ID === e.Rule_ID);
+        if(!rule) return null;
+        const n = Number(rule.BedsPerWave);
+        return (rule.BedsPerWave && !isNaN(n) && n > 0) ? n : null;
     }
 
     function wireEventCard_(e){
         const bedGrid = document.getElementById('bed-grid-' + e.Event_ID);
+        const bedLabel = document.querySelector('#event-card-' + e.Event_ID + ' .field-label');
         const candidates = candidateBedsForEvent_(e);
+        const homeBlock = resolveCropHomeBedBlock_(e.Crop_ID);
+        const cap = bedsPerWaveForEvent_(e);
+        if(bedLabel){
+            bedLabel.textContent = 'Assign Beds (Rest, ' + e.Target_Facility + (homeBlock ? ', Block ' + homeBlock : '') + (cap ? ' -- max ' + cap + '/wave' : '') + ')';
+        }
         if(!candidates.length){
-            bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--text-muted);">No Rest beds currently match ${e.Target_Facility}.</div>`;
+            bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--text-muted);">No Rest beds currently match ${e.Target_Facility}${homeBlock ? ' in Block ' + homeBlock : ''}.</div>`;
             return;
         }
         bedGrid.innerHTML = candidates.map(b => `<button type="button" class="chip" data-bed="${b.Bed_ID}">${b.Bed_ID}</button>`).join('');
@@ -608,6 +653,7 @@
         const dispatchBtn = document.getElementById('dispatch-btn-' + e.Event_ID);
         const countEl = document.getElementById('bed-count-' + e.Event_ID);
         const workerSelect = document.getElementById('worker-select-' + e.Event_ID);
+        const errEl = document.getElementById('event-error-' + e.Event_ID);
         const refreshDispatchEnabled_ = () => {
             dispatchBtn.disabled = selected.size === 0 || !workerSelect.value;
         };
@@ -615,9 +661,21 @@
             const chip = ev.target.closest('.chip');
             if(!chip || !bedGrid.contains(chip)) return;
             const bedId = chip.dataset.bed;
-            if(selected.has(bedId)){ selected.delete(bedId); chip.classList.remove('selected'); }
-            else { selected.add(bedId); chip.classList.add('selected'); }
-            countEl.textContent = selected.size + ' bed' + (selected.size === 1 ? '' : 's') + ' selected';
+            if(selected.has(bedId)){
+                selected.delete(bedId); chip.classList.remove('selected');
+                if(errEl) errEl.textContent = '';
+            } else {
+                // Enforce the same per-wave cap the auto-allocator respects --
+                // a manual override can still pick WHICH beds, but not MORE
+                // beds than the rule allows.
+                if(cap && selected.size >= cap){
+                    if(errEl) errEl.textContent = `This wave is capped at ${cap} bed${cap === 1 ? '' : 's'} -- deselect one before adding another.`;
+                    return;
+                }
+                selected.add(bedId); chip.classList.add('selected');
+                if(errEl) errEl.textContent = '';
+            }
+            countEl.textContent = selected.size + ' bed' + (selected.size === 1 ? '' : 's') + ' selected' + (cap ? ' (max ' + cap + ')' : '');
             refreshDispatchEnabled_();
         });
         workerSelect.addEventListener('change', refreshDispatchEnabled_);
