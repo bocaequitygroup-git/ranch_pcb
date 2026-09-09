@@ -326,7 +326,11 @@
        picked up by the others automatically.
        ====================================================================== */
     const CONN_KEY = 'vpos_apps_script_url';
-    let APPS_SCRIPT_URL = localStorage.getItem(CONN_KEY) || '';
+    // Same shared deployment ranch_aab.html/WorkerApp.html default to --
+    // whichever board a manager signs into first, this is the URL they hit
+    // unless a different one has been saved to CONN_KEY.
+    const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwUFXoHDFSUArQCIqkh2De8-fwPfWSG9LRvtagJPzmJdFaBx_95av5V57NzYs1J1IZLnA/exec';
+    let APPS_SCRIPT_URL = localStorage.getItem(CONN_KEY) || DEFAULT_APPS_SCRIPT_URL;
     let LIVE_MODE = false;
     let DATA = null; // { bed_master, crop_reference, planting_events, planting_rules, ... }
 
