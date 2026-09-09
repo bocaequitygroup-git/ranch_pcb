@@ -657,6 +657,30 @@
         const refreshDispatchEnabled_ = () => {
             dispatchBtn.disabled = selected.size === 0 || !workerSelect.value;
         };
+        // Auto-preselect (2026-09-09) -- same allocation BedAllocationEngine.gs's
+        // allocateBedsForPlantingEvent_ computes server-side (first N of the
+        // already-correct facility+block-filtered pool, sorted by Bed_ID, N =
+        // BedsPerWave), applied here client-side so the grid opens already
+        // showing the recommended range (e.g. B2-01..B2-05 for a 5-bed Sukuma
+        // wave) instead of an unfiltered 55-bed pool waiting to be hand-picked.
+        // Deliberately NOT baked into PLANTING_EVENTS.Bed_Range at generation
+        // time -- see this file's own note on why that would go stale between
+        // generation and dispatch (another event could claim one of these beds
+        // in the meantime); this recomputes fresh, every render, off the live
+        // candidate pool. A manager can still deselect/reselect any bed within
+        // the same block+facility -- this only changes the DEFAULT, not what's
+        // choosable.
+        const preselectCount = cap ? Math.min(cap, candidates.length) : 0;
+        candidates.slice(0, preselectCount).forEach(b => selected.add(b.Bed_ID));
+        bedGrid.querySelectorAll('.chip').forEach(chip => {
+            if(selected.has(chip.dataset.bed)) chip.classList.add('selected');
+        });
+        if(preselectCount > 0){
+            countEl.textContent = selected.size + ' bed' + (selected.size === 1 ? '' : 's') + ' selected (auto, max ' + cap + ') -- click to override';
+        } else {
+            countEl.textContent = '0 beds selected' + (cap ? ' (max ' + cap + ')' : '');
+        }
+        refreshDispatchEnabled_();
         bedGrid.addEventListener('click', (ev) => {
             const chip = ev.target.closest('.chip');
             if(!chip || !bedGrid.contains(chip)) return;
