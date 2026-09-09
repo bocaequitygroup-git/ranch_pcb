@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ngapori Ranch - PCB Planner / Command Board</title>
+<style>
+    /* ==========================================================================
+       Same design system as ranch_aab.html / WorkerApp.html (same CSS vars,
+       chip-grid pattern, conn-pill/conn-panel, login gate) so this reads as
+       part of the same app suite rather than a bolted-on tool. PCB is the
+       "strategic brain" companion to AAB's "daily execution" board: it reads
+       CROP_PLANTING_RULES -> PLANTING_EVENTS (the new Rules-to-Events engine's
+       staging layer) and turns a PLANNED event into a real COHORT_MASTER +
+       BED_MASTER assignment, at which point it becomes exactly the kind of
+       task AAB/WorkerApp already know how to display and dispatch. PCB never
+       writes BED_MASTER/COHORT_MASTER itself in a way AAB doesn't already
+       understand -- "Dispatch Event" below calls the same createCohort_ used
+       by AAB's own New Cohort step, then updates BED_MASTER state exactly the
+       way handleDispatchTask_ already does for a manually-dispatched planting.
+       ========================================================================== */
+    :root {
+        --bg-dark: #0f1416;
+        --panel-bg: #1a2327;
+        --border-color: #2c3b41;
+        --text-main: #eceff1;
+        --text-muted: #78909c;
+        --status-red: #e53935;
+        --status-orange: #fb8c00;
+        --status-purple: #8e24aa;
+        --status-green: #43a047;
+        --status-gray: #37474f;
+        --status-amber: #c9a227;
+        --status-blue: #2196f3;
+    }
+    body { background: var(--bg-dark); color: var(--text-main); font-family: system-ui, sans-serif; margin: 0; padding: 0; }
+    header { background: var(--panel-bg); border-bottom: 1px solid var(--border-color); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+    h1 { font-size: 16px; margin: 0; }
+    .sub-line { font-size: 11px; color: var(--text-muted); }
+
+    /* connection pill + panel (identical wire-format/localStorage key to
+       ranch_aab.html -- a URL saved on either board is picked up by both) */
+    .conn-pill{ display:flex; align-items:center; gap:7px; font-size:11.5px; font-weight:600; background:rgba(255,255,255,0.06); border:1px solid var(--border-color); color:var(--text-main); padding:6px 12px; border-radius:20px; cursor:pointer; }
+    .conn-pill:hover{background:rgba(255,255,255,0.12);}
+    .conn-dot{width:8px;height:8px;border-radius:50%; background:var(--text-muted); flex:none;}
+    .conn-dot.live{background:var(--status-green); box-shadow:0 0 0 3px rgba(67,160,71,0.25);}
+    .conn-dot.error{background:var(--status-red);}
+    .conn-panel{ max-height:0; overflow:hidden; background:#141b1d; border-bottom:1px solid var(--border-color); transition:max-height .2s ease; }
+    .conn-panel.open{max-height:130px;}
+    .conn-panel-inner{padding:14px 24px 16px;}
+    .conn-row{display:flex; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;}
+    .conn-row label{font-size:11.5px; color:var(--text-muted);}
+    #conn-url-input{ flex:1; min-width:280px; font-size:12px; padding:7px 10px; border-radius:16px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); font-family: monospace; }
+    #conn-url-input::placeholder{color:var(--text-muted);}
+    .conn-status{font-size:11.5px; color:var(--text-muted);}
+    .btn{ font-size:11.5px; font-weight:600; padding:6px 14px; border-radius:16px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); cursor:pointer; }
+    .btn:hover{background:rgba(255,255,255,0.12);}
+    .btn:disabled{opacity:.35; cursor:not-allowed;}
+    .btn-primary{background:var(--status-green); border-color:var(--status-green); color:#08110a;}
+    .btn-primary:hover{filter:brightness(1.08);}
+    .btn-primary:disabled{background:var(--status-gray); border-color:var(--status-gray); color:var(--text-muted);}
+    .hidden{ display:none !important; }
+
+    /* login gate -- identical Manager/Founder-only pattern as ranch_aab.html */
+    #login-screen{ position:fixed; inset:0; background:var(--bg-dark); display:flex; align-items:center; justify-content:center; z-index:100; }
+    #login-card{ width:320px; background:var(--panel-bg); border:1px solid var(--border-color); border-radius:10px; padding:24px; }
+    #login-card h1{ font-size:16px; margin-bottom:4px; }
+    #login-card .sub{ color:var(--text-muted); font-size:11.5px; margin-bottom:20px; }
+    #login-card label{ display:block; font-size:11px; color:var(--text-muted); margin:10px 0 4px; text-transform:uppercase; letter-spacing:.03em; }
+    #login-card input{ width:100%; box-sizing:border-box; font-size:13px; padding:9px 11px; border-radius:6px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); }
+    #login-card .btn{ width:100%; margin-top:16px; text-align:center; }
+    #login-error{ color:#ff8a80; font-size:11.5px; min-height:0; }
+    #login-advanced-toggle{ margin-top:14px; font-size:11px; color:var(--text-muted); text-decoration:underline; cursor:pointer; text-align:center; }
+    #login-advanced{ max-height:0; overflow:hidden; transition:max-height .2s ease; }
+    #login-advanced.open{ max-height:140px; margin-top:10px; }
+
+    /* pipeline widget -- "Next 14 Days Planting Pipeline" summary strip.
+       Same component also documented standalone for DashboardAPI.gs/
+       Dashboard_VPOS.html in PlanningEngine.gs's header comment, since no
+       existing dashboard file was provided to edit directly. */
+    #pipeline-widget{ display:flex; gap:14px; flex-wrap:wrap; align-items:center; padding:12px 24px; background:var(--panel-bg); border-bottom:1px solid var(--border-color); }
+    #pipeline-widget .pipeline-title{ font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em; }
+    .pipeline-chip{ display:flex; align-items:center; gap:6px; font-size:12px; background:rgba(255,255,255,0.04); border:1px solid var(--border-color); border-radius:14px; padding:5px 12px; }
+    .pipeline-chip b{ font-size:13px; }
+    .pipeline-chip .dot{ width:7px; height:7px; border-radius:50%; }
+
+    /* tabs */
+    .tab-bar{ display:flex; gap:6px; padding:10px 24px; background:var(--panel-bg); border-bottom:1px solid var(--border-color); flex-wrap:wrap; }
+    .tab-btn{ font-size:12px; font-weight:700; padding:7px 16px; border-radius:16px; border:1px solid var(--border-color); background:rgba(255,255,255,0.03); color:var(--text-muted); cursor:pointer; }
+    .tab-btn:hover{ background:rgba(255,255,255,0.09); color:var(--text-main); }
+    .tab-btn.active{ background:var(--text-main); color:#0f1416; border-color:var(--text-main); }
+    .view{ padding:20px 24px; display:none; }
+    .view.active{ display:block; }
+
+    /* event cards */
+    #events-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:14px; }
+    .event-card{ background:var(--panel-bg); border:1px solid var(--border-color); border-radius:10px; padding:14px; }
+    .event-card-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px; }
+    .event-crop{ font-size:15px; font-weight:800; }
+    .event-crop .code{ font-family:monospace; font-size:11px; color:var(--text-muted); font-weight:400; margin-left:6px; }
+    .event-status{ font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:10px; text-transform:uppercase; letter-spacing:.03em; white-space:nowrap; }
+    .event-status.PLANNED{ background:rgba(33,150,243,0.18); color:#64b5f6; }
+    .event-status.DISPATCHED{ background:rgba(67,160,71,0.18); color:#81c784; }
+    .event-wave{ display:inline-block; font-size:10.5px; color:var(--text-muted); background:rgba(255,255,255,0.05); border-radius:10px; padding:2px 9px; margin-bottom:10px; }
+    .event-row{ display:flex; justify-content:space-between; font-size:12px; padding:4px 0; border-bottom:1px solid var(--border-color); }
+    .event-row .k{ color:var(--text-muted); }
+    .event-card .field-label{ font-size:10px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.03em; margin:12px 0 6px; }
+    .chip-grid{ display:flex; flex-wrap:wrap; gap:6px; }
+    .chip{ font-size:11px; font-weight:600; padding:6px 11px; border-radius:14px; border:1px solid var(--border-color); background:rgba(255,255,255,0.04); color:var(--text-main); cursor:pointer; line-height:1.3; }
+    .chip:hover{ background:rgba(255,255,255,0.11); }
+    .chip.selected{ background:var(--status-green); border-color:var(--status-green); color:#08110a; font-weight:700; }
+    .chip:disabled{ opacity:.3; cursor:not-allowed; }
+    .event-card-actions{ display:flex; gap:8px; margin-top:12px; align-items:center; }
+    .event-form-error{ color:#ff8a80; font-size:11px; margin-top:8px; min-height:0; }
+    .event-form-error:empty{ display:none; }
+    .empty-note{ color:var(--text-muted); font-size:12.5px; padding:30px; text-align:center; border:1px dashed var(--border-color); border-radius:10px; }
+
+    /* timeline */
+    .timeline-row{ display:grid; grid-template-columns:190px 1fr; gap:10px; align-items:center; padding:8px 0; border-bottom:1px solid var(--border-color); }
+    .timeline-label{ font-size:12px; }
+    .timeline-label .wave{ display:block; font-size:10px; color:var(--text-muted); }
+    .timeline-track{ position:relative; height:22px; background:rgba(255,255,255,0.03); border-radius:4px; }
+    .timeline-bar{ position:absolute; top:3px; height:16px; border-radius:8px; background:var(--status-blue); opacity:.55; }
+    .timeline-marker{ position:absolute; top:-2px; width:2px; height:26px; background:var(--status-green); }
+    .timeline-marker.DISPATCHED{ background:var(--text-muted); }
+    .timeline-axis{ display:grid; grid-template-columns:190px 1fr; font-size:9.5px; color:var(--text-muted); margin-bottom:6px; }
+    .timeline-axis-track{ position:relative; height:14px; }
+    .timeline-axis-tick{ position:absolute; top:0; transform:translateX(-50%); }
+
+    /* spatial grid (mirrors ranch_aab.html's bed layout) */
+    .canvas-container{ padding:6px 0 16px; display:flex; justify-content:center; overflow-x:auto; }
+    svg{ background:#12181a; border:1px solid var(--border-color); border-radius:8px; }
+    .block-label{ fill: var(--text-muted); font-size: 11px; font-weight: bold; font-family: monospace; }
+    .bed-rect{ fill:#0f1416; stroke-width:2; rx:3; }
+    .bed-text{ fill:var(--text-main); font-size:8px; font-weight:bold; text-anchor:middle; font-family:monospace; }
+    .grid-legend{ display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--text-muted); margin-bottom:10px; }
+    .grid-legend span.sw{ display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+
+    /* batch generator */
+    .form-grid{ display:grid; grid-template-columns:1fr 1fr; gap:20px; max-width:900px; }
+    .form-card{ background:var(--panel-bg); border:1px solid var(--border-color); border-radius:10px; padding:16px; }
+    .field-label{ font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.03em; margin:14px 0 6px; }
+    .field-label:first-child{ margin-top:0; }
+    .form-card input, .form-card select{ width:100%; box-sizing:border-box; font-size:12.5px; padding:8px 10px; border-radius:6px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); font-family:inherit; }
+    .preview-row{ display:flex; justify-content:space-between; font-size:12px; padding:6px 0; border-bottom:1px solid var(--border-color); }
+    .preview-row .tag{ font-size:9.5px; color:var(--text-muted); }
+    #batch-json{ width:100%; box-sizing:border-box; min-height:110px; font-family:monospace; font-size:11px; background:#0f1416; color:#a5d6a7; border:1px solid var(--border-color); border-radius:6px; padding:10px; margin-top:8px; }
+
+    .queue-warning{ display:none; background:rgba(251,140,0,0.12); border-bottom:1px solid var(--status-orange); color:#ffcc80; font-size:12px; padding:8px 24px; }
+    .queue-warning.show{ display:block; }
+</style>
+</head>
+<body>
+
+    <!-- LOGIN GATE -- same 'login' action / Manager+Founder-only gate as
+         ranch_aab.html. Planning/dispatch is a management action, so this
+         board never lets a worker ID/PIN past the gate either. -->
+    <div id="login-screen">
+        <div id="login-card">
+            <h1>Ngapori Ranch — PCB Planner</h1>
+            <div class="sub">Manager / Founder sign-in required.</div>
+            <div id="login-error"></div>
+            <label for="login-worker-id">User ID</label>
+            <input id="login-worker-id" type="text" placeholder="e.g. USR-FOUNDER" autocapitalize="off" autocorrect="off" spellcheck="false" />
+            <label for="login-pin">PIN</label>
+            <input id="login-pin" type="password" placeholder="****" />
+            <button class="btn btn-primary" id="login-submit-btn">Sign In</button>
+            <div id="login-advanced-toggle">Use a different server URL</div>
+            <div id="login-advanced">
+                <label for="login-url-input">Apps Script Web App URL (ends in /exec)</label>
+                <input id="login-url-input" type="text" placeholder="https://script.google.com/macros/s/…/exec" />
+                <button class="btn" id="login-url-save-btn">Save URL</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="app-root" style="display:none;">
+    <header>
+        <div>
+            <h1>NGAPORI RANCH PCB — PLANNER / COMMAND BOARD</h1>
+            <span class="sub-line">Rules-to-Events engine: CROP_PLANTING_RULES → PLANTING_EVENTS → dispatched to BED_MASTER/COHORT_MASTER</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px;">
+            <button class="conn-pill" id="refresh-btn" title="Refresh live data now">
+                <span id="refresh-icon">⟳</span><span id="refresh-label">Refresh</span>
+            </button>
+            <button class="conn-pill" id="manager-pill" title="Click to sign out">
+                <span class="conn-dot" id="manager-dot"></span><span id="manager-label">Not signed in</span>
+            </button>
+            <button class="conn-pill" id="conn-pill" title="Click to manage the live connection">
+                <span class="conn-dot" id="conn-dot"></span><span id="conn-label">Not connected</span>
+            </button>
+        </div>
+    </header>
+
+    <div class="queue-warning" id="queue-warning"></div>
+
+    <div class="conn-panel" id="conn-panel">
+        <div class="conn-panel-inner">
+            <div class="conn-row">
+                <label for="conn-url-input">Apps Script Web App URL (ends in <span style="font-family:monospace;">/exec</span>)</label>
+                <input id="conn-url-input" type="text" placeholder="https://script.google.com/macros/s/…/exec" />
+            </div>
+            <div class="conn-row" style="gap:8px;">
+                <button class="btn btn-primary" id="conn-connect-btn">Connect</button>
+                <button class="btn" id="conn-refresh-btn">Refresh now</button>
+                <span class="conn-status" id="conn-status"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- "Next 14 Days Planting Pipeline" widget (task 3). This same summary
+         is reproduced as a standalone DashboardAPI.gs function
+         (getUpcomingPlantingPipeline_) in PlanningEngine.gs for embedding
+         into an executive Dashboard/Today view -- kept here too since PCB is
+         the natural home for it and no separate dashboard file was supplied
+         to edit directly. -->
+    <div id="pipeline-widget">
+        <span class="pipeline-title">Next 14 Days Pipeline</span>
+        <span id="pipeline-chips">
+            <span class="pipeline-chip"><span class="dot" style="background:var(--text-muted);"></span>Connect to load…</span>
+        </span>
+    </div>
+
+    <div class="tab-bar" id="tab-bar">
+        <button class="tab-btn active" data-view="events">Planned Events</button>
+        <button class="tab-btn" data-view="timeline">Succession Timeline</button>
+        <button class="tab-btn" data-view="grid">Spatial Grid</button>
+        <button class="tab-btn" data-view="batch">Batch Generator</button>
+    </div>
+
+    <!-- ===================== VIEW 1: Planned Events queue ===================== -->
+    <div class="view active" id="view-events">
+        <div id="events-grid"><div class="empty-note">Connect to the Apps Script backend to load PLANTING_EVENTS.</div></div>
+    </div>
+
+    <!-- ===================== VIEW 2: Succession Timeline ===================== -->
+    <div class="view" id="view-timeline">
+        <div id="timeline-body"><div class="empty-note">Connect to load the succession schedule.</div></div>
+    </div>
+
+    <!-- ===================== VIEW 3: Spatial Grid ===================== -->
+    <div class="view" id="view-grid">
+        <div class="grid-legend">
+            <span><span class="sw" style="background:var(--status-gray); opacity:.6;"></span>Rest / available</span>
+            <span><span class="sw" style="background:var(--status-blue);"></span>Prep</span>
+            <span><span class="sw" style="background:var(--status-green);"></span>Growing / Planted</span>
+            <span><span class="sw" style="background:var(--status-purple);"></span>Harvestable</span>
+            <span><span class="sw" style="background:var(--status-amber);"></span>Cleanup</span>
+        </div>
+        <div class="canvas-container">
+            <svg id="pcb-svg" viewBox="0 0 900 340" width="900" height="340">
+                <g id="pcb-block-labels"></g>
+                <g id="pcb-beds-layer"></g>
+            </svg>
+        </div>
+    </div>
+
+    <!-- ===================== VIEW 4: Batch Generator ===================== -->
+    <div class="view" id="view-batch">
+        <div class="form-grid">
+            <div class="form-card">
+                <div class="field-label">Crop</div>
+                <select id="batch-crop-select"><option value="">Connect to load crop reference…</option></select>
+
+                <div class="field-label">Back-schedule from</div>
+                <select id="batch-anchor-select">
+                    <option value="harvest">Target Harvest Date</option>
+                    <option value="field">Field Planting / Transplant Date</option>
+                </select>
+
+                <div class="field-label" id="batch-anchor-date-label">Target Harvest Date</div>
+                <input type="date" id="batch-anchor-date">
+
+                <div class="field-label">Days To Maturity (DTM, field → harvest)</div>
+                <input type="number" id="batch-dtm" min="1" placeholder="from CROP_REFERENCE Cycle_Days">
+
+                <div class="field-label">Nursery Days (0 if direct-sown)</div>
+                <input type="number" id="batch-nursery-days" min="0" value="0">
+
+                <div class="field-label">Target Facility</div>
+                <select id="batch-facility-select">
+                    <option value="OPEN_FIELD">OPEN_FIELD</option>
+                    <option value="HIGH_TUNNEL_UNHEATED">HIGH_TUNNEL_UNHEATED</option>
+                    <option value="GREENHOUSE_HEATED">GREENHOUSE_HEATED</option>
+                    <option value="OPEN_FIELD_PERENNIAL">OPEN_FIELD_PERENNIAL</option>
+                </select>
+
+                <div class="field-label">Succession</div>
+                <div style="display:flex; gap:10px;">
+                    <div style="flex:1;">
+                        <label style="font-size:10.5px; color:var(--text-muted);">Interval (days)</label>
+                        <input type="number" id="batch-interval-days" min="0" value="14">
+                    </div>
+                    <div style="flex:1;">
+                        <label style="font-size:10.5px; color:var(--text-muted);">Number of waves</label>
+                        <input type="number" id="batch-wave-count" min="1" value="4">
+                    </div>
+                </div>
+                <div class="field-label">Wave Name</div>
+                <input type="text" id="batch-wave-name" placeholder="e.g. Fall Succession Wave">
+
+                <div style="margin-top:16px; display:flex; gap:8px;">
+                    <button class="btn btn-primary" id="batch-preview-btn">Generate Preview</button>
+                    <button class="btn" id="batch-save-btn" disabled>Save to Planning Queue</button>
+                </div>
+                <div class="event-form-error" id="batch-error"></div>
+            </div>
+            <div class="form-card">
+                <div class="field-label" style="margin-top:0;">Preview</div>
+                <div id="batch-preview"><div class="empty-note" style="padding:16px;">Generate a preview to see computed nursery/field/harvest dates for each wave.</div></div>
+                <div id="batch-json-wrap" class="hidden">
+                    <div class="field-label">Payload (fallback — copy into your backend console if <code>generate-planting-events</code> isn't deployed yet)</div>
+                    <textarea id="batch-json" readonly></textarea>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    </div><!-- /app-root -->
+
+<script>
+    /* ======================================================================
+       LIVE CONNECTION -- same wire format, same localStorage key, as
+       ranch_aab.html / WorkerApp.html: text/plain POST of {action, payload}
+       to the shared /exec URL. A URL saved on any of the three boards is
+       picked up by the others automatically.
+       ====================================================================== */
+    const CONN_KEY = 'vpos_apps_script_url';
+    let APPS_SCRIPT_URL = localStorage.getItem(CONN_KEY) || '';
+    let LIVE_MODE = false;
+    let DATA = null; // { bed_master, crop_reference, planting_events, planting_rules, ... }
+
+    const PCB_SESSION_KEY = 'vpos_pcb_session';
+    let SESSION = null;
+
+    const API_TIMEOUT_MS = 45000;
+
+    function callApi_(url, action, payload){
+        return new Promise((resolve, reject) => {
+            if(!url){ reject(new Error('No Apps Script URL configured')); return; }
+            const controller = new AbortController();
+            const timer = setTimeout(() => { controller.abort(); reject(new Error('Timed out reaching the Apps Script Web App after ' + Math.round(API_TIMEOUT_MS/1000) + 's')); }, API_TIMEOUT_MS);
+            fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: JSON.stringify({ action, payload: payload || {} }),
+                signal: controller.signal
+            }).then(res => res.json()).then(data => { clearTimeout(timer); resolve(data); })
+              .catch(err => { clearTimeout(timer); reject(new Error(err && err.name === 'AbortError' ? 'Timed out reaching the Apps Script Web App' : 'Could not reach that URL')); });
+        });
+    }
+
+    /* ---------------------------- AUTH ---------------------------- */
+    function loadCachedSession_(){ try { const raw = sessionStorage.getItem(PCB_SESSION_KEY); return raw ? JSON.parse(raw) : null; } catch(e){ return null; } }
+    function saveSession_(user){ SESSION = user; sessionStorage.setItem(PCB_SESSION_KEY, JSON.stringify(user)); renderManagerPill_(); }
+    function clearSession_(){ SESSION = null; sessionStorage.removeItem(PCB_SESSION_KEY); renderManagerPill_(); }
+    function renderManagerPill_(){
+        const dot = document.getElementById('manager-dot');
+        const lbl = document.getElementById('manager-label');
+        if(SESSION){ dot.className = 'conn-dot live'; lbl.textContent = SESSION.name + ' (' + SESSION.role + ')'; }
+        else { dot.className = 'conn-dot'; lbl.textContent = 'Not signed in'; }
+    }
+    function showLoginScreen_(){ document.getElementById('app-root').style.display = 'none'; document.getElementById('login-screen').style.display = 'flex'; document.getElementById('login-worker-id').focus(); }
+    function enterApp_(){
+        document.getElementById('login-screen').style.display = 'none';
+        document.getElementById('app-root').style.display = '';
+        renderManagerPill_();
+        if(APPS_SCRIPT_URL){ connectLive(APPS_SCRIPT_URL); }
+    }
+    async function performLogin_(){
+        const workerId = document.getElementById('login-worker-id').value.trim();
+        const pin = document.getElementById('login-pin').value;
+        const errEl = document.getElementById('login-error');
+        errEl.textContent = '';
+        if(!workerId || !pin){ errEl.textContent = 'Enter your User ID and PIN.'; return; }
+        const btn = document.getElementById('login-submit-btn');
+        btn.disabled = true; btn.textContent = 'Signing in…';
+        try {
+            const res = await callApi_(APPS_SCRIPT_URL, 'login', { workerId, pin });
+            if(!res || !res.success){ errEl.textContent = (res && res.error) || 'Invalid credentials.'; return; }
+            if(res.user.role !== 'Manager' && res.user.role !== 'Founder'){
+                callApi_(APPS_SCRIPT_URL, 'logout', { workerId: res.user.workerId }).catch(function(){});
+                errEl.textContent = 'This board is for Managers/Founders only.';
+                return;
+            }
+            saveSession_({ workerId: res.user.workerId, name: res.user.name, role: res.user.role });
+            document.getElementById('login-pin').value = '';
+            enterApp_();
+        } catch(err){
+            errEl.textContent = 'Could not reach the server: ' + err.message;
+        } finally {
+            btn.disabled = false; btn.textContent = 'Sign In';
+        }
+    }
+    function signOut_(){
+        if(!confirm('Sign out of the planner?')) return;
+        const loggedOutId = SESSION && SESSION.workerId;
+        clearSession_();
+        if(loggedOutId){ callApi_(APPS_SCRIPT_URL, 'logout', { workerId: loggedOutId }).catch(function(){}); }
+        DATA = null; LIVE_MODE = false;
+        document.getElementById('login-worker-id').value = '';
+        document.getElementById('login-pin').value = '';
+        document.getElementById('login-error').textContent = '';
+        showLoginScreen_();
+    }
+
+    function setConnUI(status, label){
+        const dot = document.getElementById('conn-dot');
+        const lbl = document.getElementById('conn-label');
+        dot.className = 'conn-dot' + (status==='live' ? ' live' : status==='error' ? ' error' : '');
+        lbl.textContent = label;
+    }
+
+    /* ------------------------ MAIN DATA LOAD ------------------------
+       Pulls everything this board needs in one round trip via the new
+       'list-planting-events' action (PlanningEngine.gs). That action is
+       expected to also return bed_master + crop_reference + planting_rules
+       so PCB doesn't need to duplicate get-manager-today-view's much
+       heavier ~20-tab assembly just to get a bed list. If a deployment
+       hasn't shipped PlanningEngine.gs yet, this fails clearly (see
+       renderQueueWarning_) rather than silently showing an empty board. */
+    async function connectLive(url, {silent} = {}){
+        if(!silent){ document.getElementById('conn-status').textContent = 'Connecting…'; }
+        try {
+            const res = await callApi_(url, 'list-planting-events', { status: 'PLANNED' });
+            if(!res.success) throw new Error(res.error || 'Server returned an error');
+            DATA = res.data || res; // tolerate either {success,data:{...}} or a flat {success,...} shape
+            LIVE_MODE = true;
+            APPS_SCRIPT_URL = url;
+            localStorage.setItem(CONN_KEY, url);
+            setConnUI('live', 'Live · synced ' + new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}));
+            document.getElementById('conn-status').textContent = 'Connected.';
+            renderQueueWarning_();
+            renderAll_();
+            return true;
+        } catch(err){
+            setConnUI('error', 'Connection failed');
+            document.getElementById('conn-status').textContent = err.message;
+            renderQueueWarning_(err.message);
+            return false;
+        }
+    }
+
+    function renderQueueWarning_(errMsg){
+        const el = document.getElementById('queue-warning');
+        if(!LIVE_MODE || !DATA){
+            el.innerHTML = 'Not connected. Planned events, the spatial grid, and the batch generator all need a live Apps Script connection.' +
+                (errMsg ? ' Last error: <code>' + String(errMsg).replace(/</g,'&lt;') + '</code>' : '') +
+                ' If the error mentions an unknown action, this deployment hasn\'t picked up <code>PlanningEngine.gs</code> yet -- ' +
+                'push it and deploy a <strong>new version</strong> of the existing deployment (editing the file alone doesn\'t update the live /exec URL).';
+            el.classList.add('show');
+        } else {
+            el.classList.remove('show');
+        }
+    }
+
+    async function refreshNow_(){
+        if(!APPS_SCRIPT_URL){ alert('No server URL configured.'); return; }
+        const icon = document.getElementById('refresh-icon');
+        const label = document.getElementById('refresh-label');
+        icon.classList.add('spin'); label.textContent = 'Refreshing…';
+        const ok = await connectLive(APPS_SCRIPT_URL, { silent: true });
+        label.textContent = 'Refresh'; icon.classList.remove('spin');
+        if(!ok){ alert('Refresh failed -- see the connection status bar for details.'); }
+    }
+
+    function renderAll_(){
+        renderPipelineWidget_();
+        renderEventsView_();
+        renderTimelineView_();
+        renderGridView_();
+        populateBatchCropSelect_();
+    }
+
+    /* ======================================================================
+       FACILITY MAPPING -- Target_Facility isn't a column on BED_MASTER;
+       it's derived the same way the physical ranch actually organizes beds
+       (CROP_ZONING_REFERENCE / BED_MASTER.Zone_Type text): B1-B4 are open
+       field blocks, Z5 is the perennial block, GHx benches are heated
+       greenhouse, HTx rows are unheated high tunnel. Mirrored server-side
+       in PlanningEngine.gs's facilityForBed_ so a bed's candidacy is judged
+       the same way in both places.
+       ====================================================================== */
+    function facilityForBed_(bed){
+        if(!bed) return null;
+        const block = String(bed.Block_ID || '').toUpperCase();
+        if(block === 'Z5') return 'OPEN_FIELD_PERENNIAL';
+        if(block.startsWith('GH')) return 'GREENHOUSE_HEATED';
+        if(block.startsWith('HT')) return 'HIGH_TUNNEL_UNHEATED';
+        if(block.startsWith('B')) return 'OPEN_FIELD';
+        return null;
+    }
+
+    function cropName_(cropId){
+        const ref = (DATA && DATA.crop_reference) || [];
+        const hit = ref.find(c => c.Crop_ID === cropId);
+        return (hit && hit.Crop_Name) || cropId;
+    }
+    function waveNameForRule_(ruleId){
+        const rules = (DATA && DATA.planting_rules) || [];
+        const hit = rules.find(r => r.Rule_ID === ruleId);
+        return hit ? hit.Wave_Name : '—';
+    }
+    function fmtDate_(d){
+        if(!d) return '—';
+        const dt = new Date(d);
+        return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+    }
+    function todayIsoDate_(){
+        const d = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    }
+
+    /* ======================================================================
+       VIEW 1 -- Planned Events card queue + bed assignment + dispatch
+       ====================================================================== */
+    function renderPipelineWidget_(){
+        const wrap = document.getElementById('pipeline-chips');
+        if(!DATA){ wrap.innerHTML = '<span class="pipeline-chip"><span class="dot" style="background:var(--text-muted);"></span>Not connected</span>'; return; }
+        const events = (DATA.planting_events || []);
+        const now = new Date(); now.setHours(0,0,0,0);
+        const horizon = new Date(now.getTime() + 14*24*60*60*1000);
+        const upcoming = events.filter(e => e.Status === 'PLANNED' && e.Planned_Date && new Date(e.Planned_Date) >= now && new Date(e.Planned_Date) <= horizon);
+        if(!upcoming.length){ wrap.innerHTML = '<span class="pipeline-chip"><span class="dot" style="background:var(--status-green);"></span>Nothing planned in the next 14 days</span>'; return; }
+        const byActivity = {};
+        upcoming.forEach(e => { byActivity[e.Activity] = (byActivity[e.Activity] || 0) + 1; });
+        const colors = { Seeding:'var(--status-blue)', Transplanting:'var(--status-green)', Harvest:'var(--status-purple)' };
+        wrap.innerHTML = Object.keys(byActivity).map(act =>
+            `<span class="pipeline-chip"><span class="dot" style="background:${colors[act] || 'var(--status-amber)'};"></span><b>${byActivity[act]}</b>&nbsp;${act}</span>`
+        ).join('') + `<span class="pipeline-chip" style="opacity:.7;">Prep beds now for what's coming due</span>`;
+    }
+
+    function renderEventsView_(){
+        const grid = document.getElementById('events-grid');
+        if(!DATA){ grid.innerHTML = '<div class="empty-note">Connect to the Apps Script backend to load PLANTING_EVENTS.</div>'; return; }
+        const events = (DATA.planting_events || []).filter(e => e.Status === 'PLANNED')
+            .sort((a,b) => new Date(a.Planned_Date) - new Date(b.Planned_Date));
+        if(!events.length){ grid.innerHTML = '<div class="empty-note">No PLANNED events waiting -- everything in the queue has already been dispatched.</div>'; return; }
+        grid.innerHTML = events.map(e => eventCardHtml_(e)).join('');
+        events.forEach(e => wireEventCard_(e));
+    }
+
+    function eventCardHtml_(e){
+        return `
+        <div class="event-card" id="event-card-${e.Event_ID}">
+            <div class="event-card-top">
+                <div class="event-crop">${cropName_(e.Crop_ID)} <span class="code">${e.Crop_ID}</span></div>
+                <span class="event-status ${e.Status}">${e.Status}</span>
+            </div>
+            <span class="event-wave">${waveNameForRule_(e.Rule_ID)}</span>
+            <div class="event-row"><span class="k">Activity</span><span>${e.Activity}</span></div>
+            <div class="event-row"><span class="k">Planned Date</span><span>${fmtDate_(e.Planned_Date)}</span></div>
+            <div class="event-row"><span class="k">Target Facility</span><span>${e.Target_Facility}</span></div>
+            <div class="field-label">Assign Beds (Rest, ${e.Target_Facility})</div>
+            <div class="chip-grid" id="bed-grid-${e.Event_ID}"></div>
+            <div class="event-card-actions">
+                <button class="btn btn-primary" id="dispatch-btn-${e.Event_ID}" disabled>Dispatch Event</button>
+                <span class="sub" id="bed-count-${e.Event_ID}" style="font-size:11px; color:var(--text-muted);">0 beds selected</span>
+            </div>
+            <div class="event-form-error" id="event-error-${e.Event_ID}"></div>
+        </div>`;
+    }
+
+    function candidateBedsForEvent_(e){
+        const beds = (DATA && DATA.bed_master) || [];
+        return beds.filter(b => b.Current_State === 'Rest' && facilityForBed_(b) === e.Target_Facility);
+    }
+
+    function wireEventCard_(e){
+        const bedGrid = document.getElementById('bed-grid-' + e.Event_ID);
+        const candidates = candidateBedsForEvent_(e);
+        if(!candidates.length){
+            bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--text-muted);">No Rest beds currently match ${e.Target_Facility}.</div>`;
+            return;
+        }
+        bedGrid.innerHTML = candidates.map(b => `<button type="button" class="chip" data-bed="${b.Bed_ID}">${b.Bed_ID}</button>`).join('');
+        const selected = new Set();
+        const dispatchBtn = document.getElementById('dispatch-btn-' + e.Event_ID);
+        const countEl = document.getElementById('bed-count-' + e.Event_ID);
+        bedGrid.addEventListener('click', (ev) => {
+            const chip = ev.target.closest('.chip');
+            if(!chip || !bedGrid.contains(chip)) return;
+            const bedId = chip.dataset.bed;
+            if(selected.has(bedId)){ selected.delete(bedId); chip.classList.remove('selected'); }
+            else { selected.add(bedId); chip.classList.add('selected'); }
+            countEl.textContent = selected.size + ' bed' + (selected.size === 1 ? '' : 's') + ' selected';
+            dispatchBtn.disabled = selected.size === 0;
+        });
+        dispatchBtn.onclick = () => dispatchEvent_(e, Array.from(selected));
+    }
+
+    /* Dispatch Event -- calls the new dispatch-planting-event action
+       (PlanningEngine.gs / dispatchPlantingEvent_), which per the spec:
+         1. Creates the cohort in COHORT_MASTER via the existing createCohort_.
+         2. Updates BED_MASTER on each assigned bed to Growing/Planted with
+            Current_Crop = Crop_ID.
+         3. Updates this PLANTING_EVENTS row's Status to DISPATCHED and
+            populates Assigned_Beds.
+       (Naming note: the spec described this as routeAction_('dispatchPlantingEvent', ...);
+       every other action already live in this codebase -- 'create-cohort',
+       'dispatch-task', 'list-workers' -- uses kebab-case, so this calls
+       'dispatch-planting-event' to match. Both names are wired up
+       server-side in PlanningEngine.gs's routeAction_ addition so a
+       differently-cased existing deployment still works.) */
+    async function dispatchEvent_(e, bedIds){
+        const managerId = SESSION && SESSION.workerId;
+        if(!managerId){ alert('Your session expired -- please sign in again.'); signOut_(); return; }
+        const errEl = document.getElementById('event-error-' + e.Event_ID);
+        const btn = document.getElementById('dispatch-btn-' + e.Event_ID);
+        errEl.textContent = '';
+        btn.disabled = true; btn.textContent = 'Dispatching…';
+        try {
+            const res = await callApi_(APPS_SCRIPT_URL, 'dispatch-planting-event', { managerId, eventId: e.Event_ID, bedIds });
+            if(!res.success) throw new Error(res.error || 'Server rejected the request.');
+            await connectLive(APPS_SCRIPT_URL, { silent: true });
+        } catch(err){
+            errEl.textContent = 'Could not dispatch: ' + err.message;
+            btn.disabled = false; btn.textContent = 'Dispatch Event';
+        }
+    }
+
+    /* ======================================================================
+       VIEW 2 -- Succession Timeline (lightweight Gantt-style strip per
+       Wave_Name/Rule, plotted against the season the rule actually spans,
+       with a tick for every generated PLANTING_EVENTS row)
+       ====================================================================== */
+    function renderTimelineView_(){
+        const body = document.getElementById('timeline-body');
+        if(!DATA){ body.innerHTML = '<div class="empty-note">Connect to load the succession schedule.</div>'; return; }
+        const rules = (DATA.planting_rules || []);
+        const events = (DATA.planting_events || []);
+        if(!rules.length){ body.innerHTML = '<div class="empty-note">No CROP_PLANTING_RULES loaded.</div>'; return; }
+
+        const allDates = [];
+        rules.forEach(r => { [r.Sow_Start, r.Sow_End, r.Transplant_Start, r.Transplant_End].forEach(d => { if(d) allDates.push(new Date(d)); }); });
+        events.forEach(e => { if(e.Planned_Date) allDates.push(new Date(e.Planned_Date)); });
+        if(!allDates.length){ body.innerHTML = '<div class="empty-note">No dated rules or events to plot.</div>'; return; }
+        const minD = new Date(Math.min(...allDates)), maxD = new Date(Math.max(...allDates));
+        const span = Math.max(1, maxD - minD);
+        const pct = d => ((new Date(d) - minD) / span) * 100;
+
+        // Month axis ticks
+        const ticks = [];
+        const cur = new Date(minD.getFullYear(), minD.getMonth(), 1);
+        while(cur <= maxD){ ticks.push(new Date(cur)); cur.setMonth(cur.getMonth() + 1); }
+        const axisHtml = `<div class="timeline-axis"><div></div><div class="timeline-axis-track">` +
+            ticks.map(t => `<span class="timeline-axis-tick" style="left:${pct(t)}%;">${t.toLocaleDateString('en-US',{month:'short'})}</span>`).join('') +
+            `</div></div>`;
+
+        const rowsHtml = rules.map(r => {
+            const start = r.Sow_Start || r.Transplant_Start;
+            const end = r.Transplant_End || r.Sow_End || start;
+            const barLeft = pct(start), barWidth = Math.max(1, pct(end) - pct(start));
+            const ruleEvents = events.filter(e => e.Rule_ID === r.Rule_ID);
+            const markers = ruleEvents.map(e => `<div class="timeline-marker ${e.Status}" style="left:${pct(e.Planned_Date)}%;" title="${e.Activity} — ${fmtDate_(e.Planned_Date)} (${e.Status})"></div>`).join('');
+            return `<div class="timeline-row">
+                <div class="timeline-label">${cropName_(r.Crop_ID)} <span class="tag">${r.Crop_ID}</span><span class="wave">${r.Wave_Name} · ${r.Target_Facility}</span></div>
+                <div class="timeline-track"><div class="timeline-bar" style="left:${barLeft}%; width:${barWidth}%;"></div>${markers}</div>
+            </div>`;
+        }).join('');
+
+        body.innerHTML = axisHtml + rowsHtml +
+            `<div class="sub" style="margin-top:12px; font-size:11px; color:var(--text-muted);">Blue bar = rule's sow/transplant window · green tick = PLANNED event · gray tick = DISPATCHED event.</div>`;
+    }
+
+    /* ======================================================================
+       VIEW 3 -- Spatial Grid (mirrors ranch_aab.html's 323-unit layout,
+       colored by BED_MASTER.Current_State rather than daily urgency, so a
+       planner can see occupied/resting/reserved at a glance before
+       assigning a wave)
+       ====================================================================== */
+    const blockConfigs = [
+        { prefix: 'B1', startX: 20 },
+        { prefix: 'B2', startX: 200 },
+        { prefix: 'B3', startX: 380 },
+        { prefix: 'B4', startX: 560 }
+    ];
+    function stateColorClass_(state){
+        switch(state){
+            case 'Rest': return 'var(--status-gray)';
+            case 'Prep': return 'var(--status-blue)';
+            case 'Growing': case 'Planted': return 'var(--status-green)';
+            case 'Harvestable': return 'var(--status-purple)';
+            case 'Cleanup': return 'var(--status-amber)';
+            default: return 'var(--status-gray)';
+        }
+    }
+    function renderGridView_(){
+        const layer = document.getElementById('pcb-beds-layer');
+        const labels = document.getElementById('pcb-block-labels');
+        layer.innerHTML = ''; labels.innerHTML = '';
+        if(!DATA){ return; }
+        const bedIndex = {};
+        (DATA.bed_master || []).forEach(b => { bedIndex[b.Bed_ID] = b; });
+
+        blockConfigs.forEach(block => {
+            labels.innerHTML += `<text class="block-label" x="${block.startX}" y="14">${block.prefix}</text>`;
+            for (let i = 1; i <= 55; i++) {
+                const col = (i - 1) % 5;
+                const row = Math.floor((i - 1) / 5);
+                const x = block.startX + (col * 32);
+                const y = 30 + (row * 26);
+                const bedId = `${block.prefix}-${i.toString().padStart(2, '0')}`;
+                const bed = bedIndex[bedId];
+                const stroke = stateColorClass_(bed ? bed.Current_State : 'Rest');
+                layer.innerHTML += `<g transform="translate(${x},${y})" title="${bedId}"><rect class="bed-rect" width="28" height="20" stroke="${stroke}"></rect><text class="bed-text" x="14" y="13">${i}</text></g>`;
+            }
+        });
+        labels.innerHTML += `<text class="block-label" x="760" y="14">Z5</text>`;
+        for (let i = 1; i <= 11; i++) {
+            const col = (i - 1) % 2;
+            const row = Math.floor((i - 1) / 2);
+            const x = 760 + (col * 68);
+            const y = 30 + (row * 26);
+            const bedId = `Z5-${i.toString().padStart(2, '0')}`;
+            const bed = bedIndex[bedId];
+            const stroke = stateColorClass_(bed ? bed.Current_State : 'Rest');
+            layer.innerHTML += `<g transform="translate(${x},${y})" title="${bedId}"><rect class="bed-rect" width="60" height="20" stroke="${stroke}"></rect><text class="bed-text" x="30" y="13">${bedId}</text></g>`;
+        }
+    }
+
+    /* ======================================================================
+       VIEW 4 -- Batch Generator: back-schedules from a DTM + target date,
+       expands a succession run of N waves at a fixed interval, previews it,
+       then either saves it via 'generate-planting-events' (if that action
+       is deployed) or hands back a copyable JSON payload as a fallback.
+       ====================================================================== */
+    function populateBatchCropSelect_(){
+        const sel = document.getElementById('batch-crop-select');
+        const crops = (DATA && DATA.crop_reference) || [];
+        if(!crops.length){ sel.innerHTML = '<option value="">No crop reference loaded</option>'; return; }
+        sel.innerHTML = crops.map(c => `<option value="${c.Crop_ID}">${c.Crop_Name} (${c.Crop_ID})</option>`).join('');
+        sel.onchange = () => {
+            const crop = crops.find(c => c.Crop_ID === sel.value);
+            if(crop && crop.Cycle_Days_Min){
+                document.getElementById('batch-dtm').value = crop.Cycle_Days_Min;
+            }
+            if(crop && crop.Nursery_Track === 'Transplants' && !document.getElementById('batch-nursery-days').value){
+                document.getElementById('batch-nursery-days').value = 21;
+            }
+        };
+        sel.dispatchEvent(new Event('change'));
+    }
+    document.getElementById('batch-anchor-select').addEventListener('change', (e) => {
+        document.getElementById('batch-anchor-date-label').textContent = e.target.value === 'harvest' ? 'Target Harvest Date' : 'Field Planting / Transplant Date';
+    });
+
+    let BATCH_PLAN = [];
+    function generateBatchPlan_(){
+        const errEl = document.getElementById('batch-error');
+        errEl.textContent = '';
+        const cropId = document.getElementById('batch-crop-select').value;
+        const anchorMode = document.getElementById('batch-anchor-select').value;
+        const anchorDateStr = document.getElementById('batch-anchor-date').value;
+        const dtm = parseInt(document.getElementById('batch-dtm').value, 10);
+        const nurseryDays = parseInt(document.getElementById('batch-nursery-days').value, 10) || 0;
+        const facility = document.getElementById('batch-facility-select').value;
+        const intervalDays = parseInt(document.getElementById('batch-interval-days').value, 10) || 0;
+        const waveCount = Math.max(1, parseInt(document.getElementById('batch-wave-count').value, 10) || 1);
+        const waveName = document.getElementById('batch-wave-name').value.trim() || 'Untitled Wave';
+
+        if(!cropId){ errEl.textContent = 'Choose a crop.'; return null; }
+        if(!anchorDateStr){ errEl.textContent = 'Choose an anchor date.'; return null; }
+        if(!dtm || dtm < 1){ errEl.textContent = 'Days To Maturity must be a positive number.'; return null; }
+
+        const dayMs = 24 * 60 * 60 * 1000;
+        const plan = [];
+        for(let w = 0; w < waveCount; w++){
+            const anchor = new Date(anchorDateStr + 'T00:00:00');
+            anchor.setTime(anchor.getTime() + w * intervalDays * dayMs);
+            let harvestDate, fieldDate;
+            if(anchorMode === 'harvest'){
+                harvestDate = new Date(anchor);
+                fieldDate = new Date(anchor.getTime() - dtm * dayMs);
+            } else {
+                fieldDate = new Date(anchor);
+                harvestDate = new Date(anchor.getTime() + dtm * dayMs);
+            }
+            const nurseryDate = nurseryDays > 0 ? new Date(fieldDate.getTime() - nurseryDays * dayMs) : null;
+            plan.push({
+                wave: w + 1,
+                cropId, waveName, facility,
+                nurserySeedingDate: nurseryDate ? nurseryDate.toISOString().slice(0,10) : null,
+                fieldPlantingDate: fieldDate.toISOString().slice(0,10),
+                targetHarvestDate: harvestDate.toISOString().slice(0,10),
+                activity: nurseryDays > 0 ? 'Transplanting' : 'Seeding'
+            });
+        }
+        return plan;
+    }
+
+    document.getElementById('batch-preview-btn').addEventListener('click', () => {
+        const plan = generateBatchPlan_();
+        if(!plan) return;
+        BATCH_PLAN = plan;
+        const previewEl = document.getElementById('batch-preview');
+        previewEl.innerHTML = plan.map(p => `
+            <div class="preview-row">
+                <span>Wave ${p.wave} — ${p.activity}${p.nurserySeedingDate ? ' (nursery ' + fmtDate_(p.nurserySeedingDate) + ')' : ''}</span>
+                <span>${fmtDate_(p.fieldPlantingDate)} → harvest ${fmtDate_(p.targetHarvestDate)} <span class="tag">${p.facility}</span></span>
+            </div>`).join('');
+        document.getElementById('batch-save-btn').disabled = false;
+    });
+
+    document.getElementById('batch-save-btn').addEventListener('click', async () => {
+        const managerId = SESSION && SESSION.workerId;
+        const errEl = document.getElementById('batch-error');
+        errEl.textContent = '';
+        if(!BATCH_PLAN.length) return;
+        const events = BATCH_PLAN.map(p => ({
+            Rule_ID: null, // server assigns/creates a rule if one doesn't already exist for this crop+wave
+            Crop_ID: p.cropId,
+            Activity: p.activity,
+            Planned_Date: p.fieldPlantingDate,
+            Target_Facility: p.facility,
+            Wave_Name: p.waveName,
+            Status: 'PLANNED'
+        }));
+        if(!LIVE_MODE || !APPS_SCRIPT_URL){
+            showBatchJsonFallback_(events, 'Not connected to a live backend.');
+            return;
+        }
+        try {
+            const res = await callApi_(APPS_SCRIPT_URL, 'generate-planting-events', { managerId, events });
+            if(!res.success) throw new Error(res.error || 'Server rejected the request.');
+            await connectLive(APPS_SCRIPT_URL, { silent: true });
+            switchTab_('events');
+        } catch(err){
+            showBatchJsonFallback_(events, err.message);
+        }
+    });
+
+    function showBatchJsonFallback_(events, reason){
+        const wrap = document.getElementById('batch-json-wrap');
+        const ta = document.getElementById('batch-json');
+        wrap.classList.remove('hidden');
+        ta.value = JSON.stringify({ action: 'generate-planting-events', payload: { events } }, null, 2);
+        document.getElementById('batch-error').textContent = 'Could not save automatically (' + reason + '). Payload below -- run it once PlanningEngine.gs is deployed, or paste into Apps Script directly.';
+    }
+
+    /* ---------------------------- TABS ---------------------------- */
+    function switchTab_(view){
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+        document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
+    }
+    document.getElementById('tab-bar').addEventListener('click', (e) => {
+        const btn = e.target.closest('.tab-btn');
+        if(!btn) return;
+        switchTab_(btn.dataset.view);
+    });
+
+    /* ------------------------ WIRE UP STATIC UI ------------------------ */
+    document.getElementById('login-submit-btn').addEventListener('click', performLogin_);
+    document.getElementById('login-pin').addEventListener('keydown', (e) => { if(e.key === 'Enter') performLogin_(); });
+    document.getElementById('login-advanced-toggle').addEventListener('click', () => {
+        document.getElementById('login-advanced').classList.toggle('open');
+    });
+    document.getElementById('login-url-save-btn').addEventListener('click', () => {
+        const url = document.getElementById('login-url-input').value.trim();
+        if(url){ APPS_SCRIPT_URL = url; localStorage.setItem(CONN_KEY, url); alert('Server URL saved.'); }
+    });
+    document.getElementById('manager-pill').addEventListener('click', signOut_);
+    document.getElementById('refresh-btn').addEventListener('click', refreshNow_);
+    document.getElementById('conn-pill').addEventListener('click', () => document.getElementById('conn-panel').classList.toggle('open'));
+    document.getElementById('conn-connect-btn').addEventListener('click', () => {
+        const url = document.getElementById('conn-url-input').value.trim();
+        if(!url){ document.getElementById('conn-status').textContent = 'Paste your /exec URL first.'; return; }
+        connectLive(url);
+    });
+    document.getElementById('conn-refresh-btn').addEventListener('click', refreshNow_);
+
+    /* ------------------------ BOOT ------------------------ */
+    (function boot(){
+        const cached = loadCachedSession_();
+        if(cached){ SESSION = cached; enterApp_(); }
+        else { showLoginScreen_(); }
+        if(APPS_SCRIPT_URL) document.getElementById('conn-url-input').value = APPS_SCRIPT_URL;
+    })();
+</script>
+</body>
+</html>
