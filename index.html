@@ -104,6 +104,7 @@
     .event-row{ display:flex; justify-content:space-between; font-size:12px; padding:4px 0; border-bottom:1px solid var(--border-color); }
     .event-row .k{ color:var(--text-muted); }
     .event-card .field-label{ font-size:10px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.03em; margin:12px 0 6px; }
+    .event-card select{ width:100%; box-sizing:border-box; font-size:12.5px; padding:8px 10px; border-radius:6px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); font-family:inherit; }
     .chip-grid{ display:flex; flex-wrap:wrap; gap:6px; }
     .chip{ font-size:11px; font-weight:600; padding:6px 11px; border-radius:14px; border:1px solid var(--border-color); background:rgba(255,255,255,0.04); color:var(--text-main); cursor:pointer; line-height:1.3; }
     .chip:hover{ background:rgba(255,255,255,0.11); }
@@ -333,6 +334,22 @@
     let APPS_SCRIPT_URL = localStorage.getItem(CONN_KEY) || DEFAULT_APPS_SCRIPT_URL;
     let LIVE_MODE = false;
     let DATA = null; // { bed_master, crop_reference, planting_events, planting_rules, ... }
+    let WORKERS = []; // [{workerId, name, role}, ...] -- populated on connect, used by the dispatch worker-picker
+
+    /* Dispatching a planting event assigns real field work (see
+       dispatch-planting-event's header comment in DateEngine.gs), and
+       handleDispatchTask_ requires a workerId the same way every other
+       dispatch already does -- so PCB needs a worker list too. Best-effort:
+       a fetch failure here shouldn't block loading the planning queue
+       itself, it just leaves the picker empty until the manager retries. */
+    async function fetchWorkers_(url){
+        try {
+            const res = await callApi_(url, 'list-workers', {});
+            return (res && res.success && res.workers) || [];
+        } catch(err){
+            return [];
+        }
+    }
 
     const PCB_SESSION_KEY = 'vpos_pcb_session';
     let SESSION = null;
@@ -416,19 +433,22 @@
     }
 
     /* ------------------------ MAIN DATA LOAD ------------------------
-       Pulls everything this board needs in one round trip via the new
-       'list-planting-events' action (PlanningEngine.gs). That action is
-       expected to also return bed_master + crop_reference + planting_rules
-       so PCB doesn't need to duplicate get-manager-today-view's much
-       heavier ~20-tab assembly just to get a bed list. If a deployment
-       hasn't shipped PlanningEngine.gs yet, this fails clearly (see
-       renderQueueWarning_) rather than silently showing an empty board. */
+       Pulls everything this board needs in one round trip via
+       'get-planting-events' -- the action that's actually wired into
+       routeAction_ (Code_main.gs -> DateEngine.gs). It returns
+       bed_master + crop_reference + planting_rules alongside
+       planting_events in the same response, so PCB doesn't need to
+       duplicate get-manager-today-view's much heavier ~20-tab assembly
+       just to get a bed list. (Previously called a 'list-planting-events'
+       action that was never wired into any deployment -- see DateEngine.gs
+       for the real, working implementation.) */
     async function connectLive(url, {silent} = {}){
         if(!silent){ document.getElementById('conn-status').textContent = 'Connecting…'; }
         try {
-            const res = await callApi_(url, 'list-planting-events', { status: 'PLANNED' });
+            const res = await callApi_(url, 'get-planting-events', { status: 'PLANNED' });
             if(!res.success) throw new Error(res.error || 'Server returned an error');
             DATA = res.data || res; // tolerate either {success,data:{...}} or a flat {success,...} shape
+            WORKERS = await fetchWorkers_(url);
             LIVE_MODE = true;
             APPS_SCRIPT_URL = url;
             localStorage.setItem(CONN_KEY, url);
@@ -558,6 +578,11 @@
             <div class="event-row"><span class="k">Target Facility</span><span>${e.Target_Facility}</span></div>
             <div class="field-label">Assign Beds (Rest, ${e.Target_Facility})</div>
             <div class="chip-grid" id="bed-grid-${e.Event_ID}"></div>
+            <div class="field-label">Assign Worker</div>
+            <select id="worker-select-${e.Event_ID}">
+                <option value="">Choose a worker…</option>
+                ${WORKERS.map(w => `<option value="${w.workerId}">${w.name || w.workerId}${w.role ? ' (' + w.role + ')' : ''}</option>`).join('')}
+            </select>
             <div class="event-card-actions">
                 <button class="btn btn-primary" id="dispatch-btn-${e.Event_ID}" disabled>Dispatch Event</button>
                 <span class="sub" id="bed-count-${e.Event_ID}" style="font-size:11px; color:var(--text-muted);">0 beds selected</span>
@@ -582,6 +607,10 @@
         const selected = new Set();
         const dispatchBtn = document.getElementById('dispatch-btn-' + e.Event_ID);
         const countEl = document.getElementById('bed-count-' + e.Event_ID);
+        const workerSelect = document.getElementById('worker-select-' + e.Event_ID);
+        const refreshDispatchEnabled_ = () => {
+            dispatchBtn.disabled = selected.size === 0 || !workerSelect.value;
+        };
         bedGrid.addEventListener('click', (ev) => {
             const chip = ev.target.closest('.chip');
             if(!chip || !bedGrid.contains(chip)) return;
@@ -589,25 +618,28 @@
             if(selected.has(bedId)){ selected.delete(bedId); chip.classList.remove('selected'); }
             else { selected.add(bedId); chip.classList.add('selected'); }
             countEl.textContent = selected.size + ' bed' + (selected.size === 1 ? '' : 's') + ' selected';
-            dispatchBtn.disabled = selected.size === 0;
+            refreshDispatchEnabled_();
         });
-        dispatchBtn.onclick = () => dispatchEvent_(e, Array.from(selected));
+        workerSelect.addEventListener('change', refreshDispatchEnabled_);
+        dispatchBtn.onclick = () => dispatchEvent_(e, Array.from(selected), workerSelect.value);
     }
 
-    /* Dispatch Event -- calls the new dispatch-planting-event action
-       (PlanningEngine.gs / dispatchPlantingEvent_), which per the spec:
-         1. Creates the cohort in COHORT_MASTER via the existing createCohort_.
-         2. Updates BED_MASTER on each assigned bed to Growing/Planted with
-            Current_Crop = Crop_ID.
-         3. Updates this PLANTING_EVENTS row's Status to DISPATCHED and
-            populates Assigned_Beds.
-       (Naming note: the spec described this as routeAction_('dispatchPlantingEvent', ...);
-       every other action already live in this codebase -- 'create-cohort',
-       'dispatch-task', 'list-workers' -- uses kebab-case, so this calls
-       'dispatch-planting-event' to match. Both names are wired up
-       server-side in PlanningEngine.gs's routeAction_ addition so a
-       differently-cased existing deployment still works.) */
-    async function dispatchEvent_(e, bedIds){
+    /* Dispatch Event -- calls 'dispatch-planting-event' (DateEngine.gs),
+       which reuses the EXISTING create-cohort -> dispatch-task chain rather
+       than writing BED_MASTER directly:
+         1. createCohort_ mints one COHORT_MASTER row for this dispatch.
+         2. handleDispatchTask_ runs once per assigned bed -- the same
+            function ranch_aab.html's manual dispatch already calls, which
+            is why a worker is required here: it writes a PLANNED
+            FIELD_LIVE_SESSION row for that worker, exactly like any other
+            dispatched task.
+         3. This PLANTING_EVENTS row flips to DISPATCHED with Assigned_Beds
+            populated (only for beds that actually succeeded -- see
+            DateEngine.gs's own header comment on partial failure).
+       IMPORTANT: this does NOT move a bed to Growing immediately -- that
+       still only happens once the worker starts the session and a manager
+       runs Verify & Lock DOB, same as every other planting on this ranch. */
+    async function dispatchEvent_(e, bedIds, workerId){
         const managerId = SESSION && SESSION.workerId;
         if(!managerId){ alert('Your session expired -- please sign in again.'); signOut_(); return; }
         const errEl = document.getElementById('event-error-' + e.Event_ID);
@@ -615,8 +647,11 @@
         errEl.textContent = '';
         btn.disabled = true; btn.textContent = 'Dispatching…';
         try {
-            const res = await callApi_(APPS_SCRIPT_URL, 'dispatch-planting-event', { managerId, eventId: e.Event_ID, bedIds });
+            const res = await callApi_(APPS_SCRIPT_URL, 'dispatch-planting-event', { managerId, eventId: e.Event_ID, bedIds, workerId });
             if(!res.success) throw new Error(res.error || 'Server rejected the request.');
+            if(res.partial){
+                errEl.textContent = 'Some beds could not be dispatched: ' + res.failures.map(f => f.bedId + ' (' + f.error + ')').join('; ');
+            }
             await connectLive(APPS_SCRIPT_URL, { silent: true });
         } catch(err){
             errEl.textContent = 'Could not dispatch: ' + err.message;
@@ -826,7 +861,11 @@
             return;
         }
         try {
-            const res = await callApi_(APPS_SCRIPT_URL, 'generate-planting-events', { managerId, events });
+            // 'add-planting-events' (DateEngine.gs) -- NOT 'generate-planting-events',
+            // which is already wired to a different, year-wide CROP_PLANTING_RULES
+            // expansion with an incompatible payload shape. See DateEngine.gs's
+            // handleAddPlantingEvents_ header comment for why these stay separate.
+            const res = await callApi_(APPS_SCRIPT_URL, 'add-planting-events', { managerId, events });
             if(!res.success) throw new Error(res.error || 'Server rejected the request.');
             await connectLive(APPS_SCRIPT_URL, { silent: true });
             switchTab_('events');
@@ -839,8 +878,8 @@
         const wrap = document.getElementById('batch-json-wrap');
         const ta = document.getElementById('batch-json');
         wrap.classList.remove('hidden');
-        ta.value = JSON.stringify({ action: 'generate-planting-events', payload: { events } }, null, 2);
-        document.getElementById('batch-error').textContent = 'Could not save automatically (' + reason + '). Payload below -- run it once PlanningEngine.gs is deployed, or paste into Apps Script directly.';
+        ta.value = JSON.stringify({ action: 'add-planting-events', payload: { events } }, null, 2);
+        document.getElementById('batch-error').textContent = 'Could not save automatically (' + reason + '). Payload below -- run it once DateEngine.gs\'s add-planting-events action is deployed, or paste into Apps Script directly.';
     }
 
     /* ---------------------------- TABS ---------------------------- */
