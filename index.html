@@ -148,6 +148,65 @@
 
     .queue-warning{ display:none; background:rgba(251,140,0,0.12); border-bottom:1px solid var(--status-orange); color:#ffcc80; font-size:12px; padding:8px 24px; }
     .queue-warning.show{ display:block; }
+
+    /* ======================================================================
+       BLOCK MAP (Block Intelligence Board) -- replaces the raw per-bed chip
+       list with crop LANES (contiguous bed ranges sharing one cohort), per
+       BlockIntelligenceEngine.gs's getBlockCropLanes_. See that file's
+       header comment for why lanes are computed live off BED_MASTER rather
+       than stored as a fixed crop->bed map.
+       ====================================================================== */
+    .block-pill-row{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
+    .block-pill{ font-size:12px; font-weight:700; padding:8px 16px; border-radius:18px; border:1px solid var(--border-color); background:rgba(255,255,255,0.03); color:var(--text-muted); cursor:pointer; }
+    .block-pill:hover{ background:rgba(255,255,255,0.09); color:var(--text-main); }
+    .block-pill.active{ background:var(--text-main); color:#0f1416; border-color:var(--text-main); }
+    .block-header{ background:var(--panel-bg); border:1px solid var(--border-color); border-radius:10px; padding:16px 18px; margin-bottom:16px; }
+    .block-header h2{ margin:0 0 4px; font-size:16px; }
+    .block-header .sub{ color:var(--text-muted); font-size:12px; margin-bottom:10px; }
+    .block-meta-row{ display:flex; gap:18px; flex-wrap:wrap; font-size:11.5px; color:var(--text-muted); }
+    .block-meta-row b{ color:var(--text-main); }
+    .lane-list{ display:flex; flex-direction:column; gap:8px; margin-bottom:18px; }
+    .lane-row{ display:flex; align-items:center; gap:12px; background:var(--panel-bg); border:1px solid var(--border-color); border-radius:8px; padding:11px 14px; }
+    .lane-row.clickable{ cursor:pointer; }
+    .lane-row.clickable:hover{ border-color:var(--text-main); background:rgba(255,255,255,0.06); }
+    .lane-swatch{ width:8px; align-self:stretch; border-radius:4px; flex:none; min-height:20px; }
+    .lane-body{ flex:1; min-width:0; }
+    .lane-crop{ font-size:13.5px; font-weight:700; }
+    .lane-crop .code{ font-family:monospace; font-size:10.5px; color:var(--text-muted); font-weight:400; margin-left:6px; }
+    .lane-beds{ font-size:11.5px; color:var(--text-muted); margin-top:2px; }
+    .lane-state-tag{ font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:10px; text-transform:uppercase; letter-spacing:.03em; white-space:nowrap; flex:none; }
+    .inactive-crops-wrap{ margin-top:6px; }
+    .inactive-crops-wrap .field-label{ margin-bottom:8px; }
+
+    /* ---------------------- Crop Planting Profile modal ---------------------- */
+    #profile-overlay{ position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200; display:none; align-items:flex-start; justify-content:center; overflow-y:auto; padding:30px 16px; }
+    #profile-overlay.open{ display:flex; }
+    #profile-modal{ background:var(--panel-bg); border:1px solid var(--border-color); border-radius:12px; width:100%; max-width:720px; padding:22px 24px 26px; }
+    .profile-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:4px; }
+    .profile-title{ font-size:19px; font-weight:800; }
+    .profile-title .code{ font-family:monospace; font-size:12px; color:var(--text-muted); font-weight:400; margin-left:8px; }
+    .profile-close-btn{ background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; line-height:1; padding:2px 6px; }
+    .profile-close-btn:hover{ color:var(--text-main); }
+    .profile-sub{ color:var(--text-muted); font-size:12px; margin-bottom:16px; }
+    .profile-section{ margin-bottom:18px; }
+    .profile-section-title{ font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px; border-bottom:1px solid var(--border-color); padding-bottom:6px; }
+    .profile-kv-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px 18px; font-size:12.5px; }
+    .profile-kv-grid .k{ color:var(--text-muted); }
+    .profile-note{ font-size:11.5px; color:var(--text-muted); margin-top:6px; font-style:italic; }
+    .stage-row, .cohort-row{ display:grid; grid-template-columns:1.3fr 0.8fr 0.7fr; gap:8px; font-size:12px; padding:6px 0; border-bottom:1px solid var(--border-color); }
+    .cohort-row{ grid-template-columns:1fr 0.8fr 1.2fr; }
+    .wave-card{ background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:8px; padding:12px 14px; margin-bottom:10px; }
+    .wave-card-top{ display:flex; justify-content:space-between; gap:8px; font-size:13px; font-weight:700; margin-bottom:6px; }
+    .wave-card-meta{ font-size:11px; color:var(--text-muted); margin-bottom:8px; }
+    .wave-event-row{ display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11.5px; padding:6px 0; border-top:1px dashed var(--border-color); flex-wrap:wrap; }
+    .wave-event-status{ font-size:9px; font-weight:700; padding:2px 8px; border-radius:8px; text-transform:uppercase; }
+    .wave-event-status.PLANNED{ background:rgba(33,150,243,0.18); color:#64b5f6; }
+    .wave-event-status.DISPATCHED{ background:rgba(67,160,71,0.18); color:#81c784; }
+    .dispatch-inline{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px; width:100%; }
+    .dispatch-inline select{ font-size:11.5px; padding:6px 8px; border-radius:6px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); font-family:inherit; }
+    .dispatch-inline .btn{ padding:6px 12px; font-size:11px; }
+    .dispatch-preview-note{ font-size:11px; color:var(--text-muted); width:100%; }
+    .dispatch-error{ color:#ff8a80; font-size:11px; width:100%; }
 </style>
 </head>
 <body>
@@ -223,14 +282,26 @@
     </div>
 
     <div class="tab-bar" id="tab-bar">
-        <button class="tab-btn active" data-view="events">Planned Events</button>
+        <button class="tab-btn active" data-view="blockmap">Block Map</button>
+        <button class="tab-btn" data-view="events">Planned Events</button>
         <button class="tab-btn" data-view="timeline">Succession Timeline</button>
         <button class="tab-btn" data-view="grid">Spatial Grid</button>
         <button class="tab-btn" data-view="batch">Batch Generator</button>
     </div>
 
+    <!-- ===================== VIEW 0: Block Map (Block Intelligence Board) =====================
+         Replaces a raw per-bed chip list with crop LANES: contiguous bed
+         ranges sharing one cohort (e.g. "Sukuma Wiki -- B2-01 to B2-05")
+         instead of 55 individual bed numbers. Click a lane, or an inactive
+         zoned crop chip, to open that crop's full Planting Profile, which
+         is where dispatch actually happens -- see BlockIntelligenceEngine.gs. -->
+    <div class="view active" id="view-blockmap">
+        <div class="block-pill-row" id="block-pill-row"></div>
+        <div id="block-map-body"><div class="empty-note">Connect to the Apps Script backend to load the Block Map.</div></div>
+    </div>
+
     <!-- ===================== VIEW 1: Planned Events queue ===================== -->
-    <div class="view active" id="view-events">
+    <div class="view" id="view-events">
         <div id="events-grid"><div class="empty-note">Connect to the Apps Script backend to load PLANTING_EVENTS.</div></div>
     </div>
 
@@ -314,6 +385,18 @@
                     <textarea id="batch-json" readonly></textarea>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- ===================== Crop Planting Profile modal ===================== -->
+    <div id="profile-overlay">
+        <div id="profile-modal">
+            <div class="profile-top">
+                <div class="profile-title" id="profile-title">—</div>
+                <button class="profile-close-btn" id="profile-close-btn" title="Close">&times;</button>
+            </div>
+            <div class="profile-sub" id="profile-sub"></div>
+            <div id="profile-body"><div class="empty-note">Loading…</div></div>
         </div>
     </div>
 
@@ -490,6 +573,7 @@
 
     function renderAll_(){
         renderPipelineWidget_();
+        renderBlockMapView_();
         renderEventsView_();
         renderTimelineView_();
         renderGridView_();
@@ -840,6 +924,295 @@
             layer.innerHTML += `<g transform="translate(${x},${y})" title="${bedId}"><rect class="bed-rect" width="60" height="20" stroke="${stroke}"></rect><text class="bed-text" x="30" y="13">${bedId}</text></g>`;
         }
     }
+
+    /* ======================================================================
+       VIEW 0 -- Block Map (Block Intelligence Board)
+       Calls 'get-block-intelligence-board' (BlockIntelligenceEngine.gs) for
+       ONE block at a time -- separate round trip from the main
+       'get-planting-events' load, since lanes need a fresh BED_MASTER read
+       (occupancy can change the instant another manager dispatches) and
+       there's no reason to compute every block's lanes when only one is on
+       screen. Block pills switch CURRENT_BLOCK_ID and re-fetch.
+       ====================================================================== */
+    let CURRENT_BLOCK_ID = 'B1';
+    const PROFILE_BLOCK_IDS_ = ['B1', 'B2', 'B3', 'B4', 'Z5'];
+
+    // BLOCK_FAMILY_NAMES_ (defined further down, in the Batch Generator
+    // section) is keyed by CROP_REFERENCE.Default_Block_ID values
+    // ('BLK-01'..'BLK-04', 'Z5'), not by BED_MASTER.Block_ID values
+    // ('B1'..'B4', 'Z5') -- this converts the latter to the former so both
+    // the block pills and the block header can share one display-name map.
+    function blockDisplayName_(bedBlockId){
+        const key = (bedBlockId === 'Z5') ? 'Z5' : ('BLK-0' + String(bedBlockId).replace(/^B/, ''));
+        return (typeof BLOCK_FAMILY_NAMES_ !== 'undefined' && BLOCK_FAMILY_NAMES_[key]) || bedBlockId;
+    }
+
+    function laneStateColor_(state){
+        switch(state){
+            case 'Rest': return 'var(--status-gray)';
+            case 'Prep': return 'var(--status-blue)';
+            case 'Growing': case 'Planted': return 'var(--status-green)';
+            case 'Harvestable': return 'var(--status-purple)';
+            case 'Harvested': return 'var(--status-amber)';
+            case 'Cleanup': return 'var(--status-amber)';
+            default: return 'var(--status-gray)';
+        }
+    }
+
+    function renderBlockPills_(){
+        const row = document.getElementById('block-pill-row');
+        row.innerHTML = PROFILE_BLOCK_IDS_.map(bid =>
+            `<button type="button" class="block-pill${bid === CURRENT_BLOCK_ID ? ' active' : ''}" data-block="${bid}">${blockDisplayName_(bid)}</button>`
+        ).join('');
+        row.querySelectorAll('.block-pill').forEach(btn => {
+            btn.addEventListener('click', () => {
+                CURRENT_BLOCK_ID = btn.dataset.block;
+                renderBlockMapView_();
+            });
+        });
+    }
+
+    async function renderBlockMapView_(){
+        renderBlockPills_();
+        const body = document.getElementById('block-map-body');
+        if(!LIVE_MODE){ body.innerHTML = '<div class="empty-note">Connect to the Apps Script backend to load the Block Map.</div>'; return; }
+        body.innerHTML = '<div class="empty-note">Loading block…</div>';
+        try {
+            const res = await callApi_(APPS_SCRIPT_URL, 'get-block-intelligence-board', { blockId: CURRENT_BLOCK_ID });
+            if(!res.success) throw new Error(res.error || 'Server returned an error');
+            renderBlockMapBody_(res.blocks[0]);
+        } catch(err){
+            body.innerHTML = `<div class="empty-note">Could not load the Block Map: ${err.message}</div>`;
+        }
+    }
+
+    function renderBlockMapBody_(block){
+        const body = document.getElementById('block-map-body');
+        if(!block){ body.innerHTML = '<div class="empty-note">No data for this block.</div>'; return; }
+        const z = block.zoning;
+        const headerHtml = `
+            <div class="block-header">
+                <h2>📍 ${blockDisplayName_(block.blockId)}</h2>
+                <div class="sub">Facility: ${block.facility || '—'}${z && z.operationalRule ? ' · ' + z.operationalRule : ''}</div>
+                <div class="block-meta-row">
+                    <span>Total Beds: <b>${block.totalBeds}</b></span>
+                    ${z && z.cohortStructure ? `<span>Structure: <b>${z.cohortStructure}</b></span>` : ''}
+                    ${z && z.bedsPerCohort ? `<span>Beds/Cohort: <b>${z.bedsPerCohort}</b></span>` : ''}
+                    <span>Active Lanes: <b>${block.lanes.filter(l => l.cropId).length}</b></span>
+                </div>
+            </div>`;
+
+        const laneRows = block.lanes.map(lane => {
+            const isCrop = !!lane.cropId;
+            const range = lane.startBed === lane.endBed ? lane.startBed : `${lane.startBed} \u2192 ${lane.endBed}`;
+            const label = isCrop ? (lane.cropName || lane.cropId) : (lane.state === 'Rest' ? 'Rest / Available' : lane.state);
+            const codeTag = isCrop ? `<span class="code">${lane.cropId}</span>` : '';
+            return `
+            <div class="lane-row${isCrop ? ' clickable' : ''}" ${isCrop ? `data-crop="${lane.cropId}"` : ''}>
+                <div class="lane-swatch" style="background:${laneStateColor_(lane.state)};"></div>
+                <div class="lane-body">
+                    <div class="lane-crop">${label}${codeTag}</div>
+                    <div class="lane-beds">${range} &middot; ${lane.bedCount} bed${lane.bedCount === 1 ? '' : 's'}${lane.cohortId ? ' &middot; ' + lane.cohortId : ''}</div>
+                </div>
+                <span class="lane-state-tag" style="background:rgba(255,255,255,0.08); color:var(--text-main);">${lane.state}</span>
+            </div>`;
+        }).join('');
+
+        const inactiveHtml = (block.inactiveCrops && block.inactiveCrops.length) ? `
+            <div class="inactive-crops-wrap">
+                <div class="field-label">Zoned for this block, not currently planted</div>
+                <div class="chip-grid">
+                    ${block.inactiveCrops.map(c => `<button type="button" class="chip" data-crop="${c.cropId}">${c.cropName}</button>`).join('')}
+                </div>
+            </div>` : '';
+
+        body.innerHTML = headerHtml + `<div class="lane-list">${laneRows || '<div class="empty-note">No beds found for this block.</div>'}</div>` + inactiveHtml;
+
+        body.querySelectorAll('[data-crop]').forEach(el => {
+            el.addEventListener('click', () => openCropProfile_(el.dataset.crop));
+        });
+    }
+
+    /* ======================================================================
+       Crop Planting Profile modal -- calls 'get-crop-planting-profile'
+       (BlockIntelligenceEngine.gs). Dispatch from inside the modal reuses
+       the EXISTING 'preview-planting-allocation' / 'auto-dispatch-planting-
+       event' actions (BedAllocationEngine.gs) unchanged -- same
+       createCohort_ -> handleDispatchTask_ -> Verify & Lock DOB chain the
+       Planned Events tab already uses. This modal only changes how a
+       manager GETS to that dispatch call, not what it does.
+       ====================================================================== */
+    function fmtDayRange_(startDay, endDay){
+        if(startDay == null) return '—';
+        return (startDay === endDay) ? ('Day ' + startDay) : ('Day ' + startDay + '–' + endDay);
+    }
+
+    async function openCropProfile_(cropId){
+        const overlay = document.getElementById('profile-overlay');
+        const titleEl = document.getElementById('profile-title');
+        const subEl = document.getElementById('profile-sub');
+        const bodyEl = document.getElementById('profile-body');
+        titleEl.textContent = cropName_(cropId);
+        subEl.textContent = cropId;
+        bodyEl.innerHTML = '<div class="empty-note">Loading planting profile…</div>';
+        overlay.classList.add('open');
+        if(!LIVE_MODE){ bodyEl.innerHTML = '<div class="empty-note">Connect to the Apps Script backend to load this profile.</div>'; return; }
+        try {
+            const res = await callApi_(APPS_SCRIPT_URL, 'get-crop-planting-profile', { cropId });
+            if(!res.success) throw new Error(res.error || 'Server returned an error');
+            renderCropProfileBody_(res);
+        } catch(err){
+            bodyEl.innerHTML = `<div class="empty-note">Could not load profile: ${err.message}</div>`;
+        }
+    }
+
+    function closeCropProfile_(){
+        document.getElementById('profile-overlay').classList.remove('open');
+    }
+
+    function renderCropProfileBody_(profile){
+        const c = profile.crop, lc = profile.lifecycle, z = profile.zoning;
+        document.getElementById('profile-title').innerHTML = `${c.cropName}<span class="code">${c.cropId}</span>`;
+        document.getElementById('profile-sub').textContent =
+            `Home Block ${c.homeBedBlock || '—'}${z && z.operationalRule ? ' · ' + z.operationalRule : ''}`;
+
+        const overviewHtml = `
+            <div class="profile-section">
+                <div class="profile-section-title">Overview</div>
+                <div class="profile-kv-grid">
+                    <div><span class="k">Nursery Track</span></div><div>${c.nurseryTrack || '—'}</div>
+                    <div><span class="k">Cycle Days</span></div><div>${c.cycleDaysMin || '?'}–${c.cycleDaysMax || '?'} days</div>
+                    <div><span class="k">Harvest Window Type</span></div><div>${(lc && lc.harvestWindowType) || '—'}</div>
+                    <div><span class="k">Days To First Harvest</span></div><div>${(lc && lc.daysToFirstHarvest) || '—'}</div>
+                    <div><span class="k">Germination Days</span></div><div>${(lc && lc.germinationDays) || '—'}</div>
+                    <div><span class="k">Propagation Method</span></div><div>${(lc && lc.propagationMethod) || '—'}</div>
+                </div>
+                ${lc && lc.harvestNotes ? `<div class="profile-note">${lc.harvestNotes}</div>` : ''}
+                ${c.notes ? `<div class="profile-note">${c.notes}</div>` : ''}
+            </div>`;
+
+        const stageHtml = profile.stageTemplate.length ? `
+            <div class="profile-section">
+                <div class="profile-section-title">Stage Timeline</div>
+                ${profile.stageTemplate.map(s => `
+                    <div class="stage-row">
+                        <span>${s.stageName}</span>
+                        <span>${fmtDayRange_(s.startDay, s.endDay)}</span>
+                        <span style="color:var(--text-muted);">${s.stageType}${s.harvestCadenceDays ? ' · every ' + s.harvestCadenceDays + 'd' : ''}</span>
+                    </div>`).join('')}
+            </div>` : '';
+
+        const cohortsHtml = profile.cohorts.length ? `
+            <div class="profile-section">
+                <div class="profile-section-title">Live &amp; Recent Cohorts</div>
+                ${profile.cohorts.map(co => `
+                    <div class="cohort-row">
+                        <span>${co.cohortId}<br><span style="color:var(--text-muted); font-size:10.5px;">${co.assignedBeds.length ? co.assignedBeds.join(', ') : 'no beds assigned'}</span></span>
+                        <span>${co.currentState}</span>
+                        <span style="color:var(--text-muted);">Planted ${fmtDate_(co.actualPlantingDate || co.plantingDate)}${co.expectedHarvestDate ? ' · harvest ~' + fmtDate_(co.expectedHarvestDate) : ''}</span>
+                    </div>`).join('')}
+            </div>` : `<div class="profile-section"><div class="profile-section-title">Live &amp; Recent Cohorts</div><div class="sub" style="font-size:11.5px; color:var(--text-muted);">No cohorts recorded for this crop yet.</div></div>`;
+
+        const wavesHtml = `
+            <div class="profile-section">
+                <div class="profile-section-title">Wave Schedule</div>
+                ${profile.waves.length ? profile.waves.map(w => waveCardHtml_(w, c.cropId)).join('') : '<div class="sub" style="font-size:11.5px; color:var(--text-muted);">No CROP_PLANTING_RULES defined for this crop yet.</div>'}
+            </div>`;
+
+        document.getElementById('profile-body').innerHTML = overviewHtml + stageHtml + cohortsHtml + wavesHtml;
+        wireProfileDispatchButtons_(profile.crop.cropId);
+    }
+
+    function waveCardHtml_(w, cropId){
+        const window = w.transplantStart ? `Transplant ${fmtDate_(w.transplantStart)} \u2192 ${fmtDate_(w.transplantEnd)}` : `Sow ${fmtDate_(w.sowStart)} \u2192 ${fmtDate_(w.sowEnd)}`;
+        const cap = w.bedsPerWave ? `${w.bedsPerWave} beds/wave` : 'uncapped';
+        const eventsHtml = w.events.length ? w.events.map(e => waveEventRowHtml_(e, w)).join('') :
+            `<div class="sub" style="font-size:11px; color:var(--text-muted); padding:6px 0;">No PLANNED/DISPATCHED events generated for this wave yet.</div>`;
+        return `
+            <div class="wave-card">
+                <div class="wave-card-top"><span>${w.waveName}</span><span style="color:var(--text-muted); font-weight:400;">${w.activity}</span></div>
+                <div class="wave-card-meta">${window} &middot; ${w.targetFacility} &middot; ${cap}${w.bedPreview && w.bedPreview.homeBlock ? ' &middot; Block ' + w.bedPreview.homeBlock : ''}</div>
+                ${eventsHtml}
+            </div>`;
+    }
+
+    function waveEventRowHtml_(e, w){
+        const dateStr = fmtDate_(e.plannedDate);
+        if(e.status !== 'PLANNED'){
+            return `<div class="wave-event-row">
+                <span>${e.activity} — ${dateStr}</span>
+                <span class="wave-event-status ${e.status}">${e.status}</span>
+                <span style="color:var(--text-muted);">${e.assignedBeds || ''}${e.cohortId ? ' · ' + e.cohortId : ''}</span>
+            </div>`;
+        }
+        return `<div class="wave-event-row" id="wave-event-${e.eventId}">
+            <span>${e.activity} — ${dateStr}</span>
+            <span class="wave-event-status PLANNED">PLANNED</span>
+            <button type="button" class="btn" data-preview-event="${e.eventId}">Preview &amp; Dispatch</button>
+            <div class="dispatch-inline hidden" id="dispatch-panel-${e.eventId}"></div>
+        </div>`;
+    }
+
+    function wireProfileDispatchButtons_(cropId){
+        document.querySelectorAll('#profile-body [data-preview-event]').forEach(btn => {
+            btn.addEventListener('click', () => previewAndShowDispatch_(btn.dataset.previewEvent, cropId, btn));
+        });
+    }
+
+    async function previewAndShowDispatch_(eventId, cropId, triggerBtn){
+        const panel = document.getElementById('dispatch-panel-' + eventId);
+        if(!panel) return;
+        triggerBtn.disabled = true; triggerBtn.textContent = 'Loading…';
+        try {
+            const res = await callApi_(APPS_SCRIPT_URL, 'preview-planting-allocation', { eventId });
+            if(!res.success) throw new Error(res.error || 'Server returned an error');
+            const bedList = res.bedIds && res.bedIds.length
+                ? (res.bedIds.length > 1 ? `${res.bedIds[0]} \u2192 ${res.bedIds[res.bedIds.length - 1]}` : res.bedIds[0])
+                : null;
+            panel.classList.remove('hidden');
+            panel.innerHTML = `
+                <span class="dispatch-preview-note">${bedList ? 'Auto-assigned beds: <b>' + bedList + '</b> (' + res.bedIds.length + ')' : (res.note || 'No Rest beds currently available.')}</span>
+                <select id="worker-select-profile-${eventId}">
+                    <option value="">Choose a worker…</option>
+                    ${WORKERS.map(w => `<option value="${w.workerId}">${w.name || w.workerId}${w.role ? ' (' + w.role + ')' : ''}</option>`).join('')}
+                </select>
+                <button type="button" class="btn btn-primary" id="confirm-dispatch-${eventId}" ${bedList ? '' : 'disabled'}>Dispatch</button>
+                <div class="dispatch-error" id="dispatch-error-${eventId}"></div>`;
+            triggerBtn.remove();
+            document.getElementById('confirm-dispatch-' + eventId).addEventListener('click', () => {
+                const workerId = document.getElementById('worker-select-profile-' + eventId).value;
+                if(!workerId){ document.getElementById('dispatch-error-' + eventId).textContent = 'Choose a worker first.'; return; }
+                doDispatchFromProfile_(eventId, workerId, cropId);
+            });
+        } catch(err){
+            triggerBtn.disabled = false; triggerBtn.textContent = 'Preview & Dispatch';
+            alert('Could not preview allocation: ' + err.message);
+        }
+    }
+
+    async function doDispatchFromProfile_(eventId, workerId, cropId){
+        const managerId = SESSION && SESSION.workerId;
+        if(!managerId){ alert('Your session expired -- please sign in again.'); signOut_(); return; }
+        const btn = document.getElementById('confirm-dispatch-' + eventId);
+        const errEl = document.getElementById('dispatch-error-' + eventId);
+        errEl.textContent = '';
+        btn.disabled = true; btn.textContent = 'Dispatching…';
+        try {
+            const res = await callApi_(APPS_SCRIPT_URL, 'auto-dispatch-planting-event', { managerId, eventId, workerId });
+            if(!res.success) throw new Error(res.error || 'Server rejected the request.');
+            // Refresh the profile in place, plus the main data set (bed
+            // states just changed) and the Block Map lanes behind it --
+            // same "reconnect after a write" pattern dispatchEvent_ uses.
+            await connectLive(APPS_SCRIPT_URL, { silent: true });
+            openCropProfile_(cropId);
+        } catch(err){
+            errEl.textContent = 'Could not dispatch: ' + err.message;
+            btn.disabled = false; btn.textContent = 'Dispatch';
+        }
+    }
+
+    document.getElementById('profile-close-btn').addEventListener('click', closeCropProfile_);
+    document.getElementById('profile-overlay').addEventListener('click', (e) => { if(e.target.id === 'profile-overlay') closeCropProfile_(); });
 
     /* ======================================================================
        VIEW 4 -- Batch Generator: back-schedules from a DTM + target date,
