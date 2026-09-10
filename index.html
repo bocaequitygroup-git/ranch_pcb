@@ -195,7 +195,8 @@
     .profile-note{ font-size:11.5px; color:var(--text-muted); margin-top:6px; font-style:italic; }
     .stage-row, .cohort-row{ display:grid; grid-template-columns:1.3fr 0.8fr 0.7fr; gap:8px; font-size:12px; padding:6px 0; border-bottom:1px solid var(--border-color); }
     .cohort-row{ grid-template-columns:1fr 0.8fr 1.2fr; }
-    .wave-card{ background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:8px; padding:12px 14px; margin-bottom:10px; }
+    .wave-card{ background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:8px; padding:12px 14px; margin-bottom:10px; transition:border-color .4s ease, box-shadow .4s ease; }
+    .wave-card.focus-highlight{ border-color:#64b5f6; box-shadow:0 0 0 2px rgba(100,181,246,0.25); }
     .wave-card-top{ display:flex; justify-content:space-between; gap:8px; font-size:13px; font-weight:700; margin-bottom:6px; }
     .wave-card-meta{ font-size:11px; color:var(--text-muted); margin-bottom:8px; }
     .wave-event-row{ display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11.5px; padding:6px 0; border-top:1px dashed var(--border-color); flex-wrap:wrap; }
@@ -620,22 +621,30 @@
     }
 
     /* ======================================================================
-       BED ALLOCATION (2026-09-09 refactor) -- this used to compute
-       Target_Facility/home-block/candidate-beds/BedsPerWave locally
-       (facilityForBed_, resolveCropHomeBedBlock_, candidateBedsForEvent_,
-       bedsPerWaveForEvent_ -- four client-side copies of logic that
-       already lives in BedAllocationEngine.gs, kept "identical branch-
-       for-branch" only by comment discipline, with no way to catch drift
-       if the server-side rule ever changed without someone remembering to
-       mirror it here). Replaced with a single call to the EXISTING
-       'preview-planting-allocation' action (BedAllocationEngine.gs),
-       which was already built for exactly this -- "show a manager the
-       auto-picked beds BEFORE committing to dispatch" -- just not wired
-       up to this tab yet. Lazy + cached (see renderBedAllocation_ below)
-       so opening the Planned Events tab doesn't fire one request per
-       visible card.
+       BED ALLOCATION (2026-09-09 pass, superseded 2026-09-09 later same
+       day) -- this tab used to run its own client-side copy of
+       facilityForBed_/resolveCropHomeBedBlock_/candidateBedsForEvent_/
+       bedsPerWaveForEvent_, then a per-card "Preview Bed Allocation"
+       button calling 'preview-planting-allocation' (BedAllocationEngine.gs)
+       and rendering a manual multi-select bed-chip grid right on the
+       card -- a manager still had to look at "Assign Beds (Rest,
+       OPEN_FIELD)" and pick individual beds, with no sense of which
+       block/cohort lane they were actually choosing into.
+       THIS IS THE BUG THE SOP FLAGGED: "the manager must guess which
+       beds belong to which crop / which cohort lane / which tunnel or
+       greenhouse is correct." Per that SOP, Planned Events is now a pure
+       TEMPORAL view (crop, wave, date, facility, status) with zero bed
+       logic -- no candidate fetch, no chip grid, no cap-enforcement
+       here. "Preview & Dispatch" instead opens the Crop Planting Profile
+       modal (BlockIntelligenceEngine.gs / openCropProfile_ below) on this
+       event's crop, scrolled straight to this exact wave/event row, where
+       the SAME 'preview-planting-allocation' -> 'auto-dispatch-planting-
+       event' chain already lives (see previewAndShowDispatch_ /
+       doDispatchFromProfile_) -- Block Map is the spatial source of
+       truth, Planned Events is the temporal one, per the SOP's own
+       framing. Nothing about the dispatch chain itself changed; only
+       WHERE a manager triggers it from.
        ====================================================================== */
-    const allocationPreviewCache_ = {}; // eventId -> the resolved preview-planting-allocation response, for this session only
 
     function cropName_(cropId){
         const ref = (DATA && DATA.crop_reference) || [];
@@ -687,6 +696,13 @@
         events.forEach(e => wireEventCard_(e));
     }
 
+    // Pure temporal card, per the SOP: crop, wave, date, facility, status.
+    // No bed chips, no worker picker, no cap math -- all of that now lives
+    // exactly once, inside the Crop Planting Profile modal (see
+    // waveEventRowHtml_ / previewAndShowDispatch_ / doDispatchFromProfile_
+    // below), which is also where Block Map lanes send a manager for the
+    // same crop. One dispatch surface, reached two ways, instead of two
+    // surfaces that could each decide beds differently.
     function eventCardHtml_(e){
         return `
         <div class="event-card" id="event-card-${e.Event_ID}">
@@ -698,160 +714,23 @@
             <div class="event-row"><span class="k">Activity</span><span>${e.Activity}</span></div>
             <div class="event-row"><span class="k">Planned Date</span><span>${fmtDate_(e.Planned_Date)}</span></div>
             <div class="event-row"><span class="k">Target Facility</span><span>${e.Target_Facility}</span></div>
-            <div class="field-label">Assign Beds (Rest, ${e.Target_Facility})</div>
-            <div class="chip-grid" id="bed-grid-${e.Event_ID}">
-                <button type="button" class="btn" id="preview-alloc-btn-${e.Event_ID}" style="font-size:12px;">Preview Bed Allocation</button>
-            </div>
-            <div class="field-label">Assign Worker</div>
-            <select id="worker-select-${e.Event_ID}">
-                <option value="">Choose a worker…</option>
-                ${WORKERS.map(w => `<option value="${w.workerId}">${w.name || w.workerId}${w.role ? ' (' + w.role + ')' : ''}</option>`).join('')}
-            </select>
             <div class="event-card-actions">
-                <button class="btn btn-primary" id="dispatch-btn-${e.Event_ID}" disabled>Dispatch Event</button>
-                <span class="sub" id="bed-count-${e.Event_ID}" style="font-size:11px; color:var(--text-muted);">Beds not previewed yet</span>
+                <button class="btn btn-primary" id="dispatch-btn-${e.Event_ID}">Preview &amp; Dispatch</button>
+                <span class="sub" style="font-size:11px; color:var(--text-muted);">Opens this crop's Planting Profile, with beds pre-assigned</span>
             </div>
-            <div class="event-form-error" id="event-error-${e.Event_ID}"></div>
         </div>`;
     }
 
-    // Fetches (or reuses a cached) preview-planting-allocation result for
-    // this event, then renders the bed grid + wires selection/dispatch.
-    // Called from the "Preview Bed Allocation" button, NOT on card render
-    // -- opening the Planned Events tab with several PLANNED events used
-    // to fire one of these per visible card immediately (candidateBedsForEvent_
-    // used to run synchronously, client-side, for every card at once).
-    // Now it's one network call per event, only when a manager actually
-    // wants to see/assign beds for that specific card, and only once per
-    // session per event (cached in allocationPreviewCache_) -- toggling
-    // back to a tab you've already previewed doesn't re-hit the backend.
-    async function renderBedAllocation_(e){
-        const bedGrid = document.getElementById('bed-grid-' + e.Event_ID);
-        const bedLabel = document.querySelector('#event-card-' + e.Event_ID + ' .field-label');
-        const countEl = document.getElementById('bed-count-' + e.Event_ID);
-
-        let alloc = allocationPreviewCache_[e.Event_ID];
-        if(!alloc){
-            bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--text-muted);">Loading candidate beds…</div>`;
-            try {
-                const res = await callApi_(APPS_SCRIPT_URL, 'preview-planting-allocation', { eventId: e.Event_ID });
-                if(!res.success) throw new Error(res.error || 'Server returned an error');
-                alloc = res;
-                allocationPreviewCache_[e.Event_ID] = res;
-            } catch(err){
-                bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--status-red);">Could not load bed allocation: ${err.message}</div>`;
-                return;
-            }
-        }
-
-        const candidateIds = alloc.candidateBedIds || [];
-        const recommended = new Set(alloc.bedIds || []);
-        const homeBlock = alloc.homeBlock;
-        const cap = alloc.cap;
-
-        if(bedLabel){
-            bedLabel.textContent = 'Assign Beds (Rest, ' + e.Target_Facility + (homeBlock ? ', Block ' + homeBlock : '') + (cap ? ' -- max ' + cap + '/wave' : '') + ')';
-        }
-        if(!candidateIds.length){
-            bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--text-muted);">No Rest beds currently match ${e.Target_Facility}${homeBlock ? ' in Block ' + homeBlock : ''}.</div>`;
-            return;
-        }
-
-        bedGrid.innerHTML = candidateIds.map(bedId => `<button type="button" class="chip" data-bed="${bedId}">${bedId}</button>`).join('');
-        const selected = new Set();
-        const dispatchBtn = document.getElementById('dispatch-btn-' + e.Event_ID);
-        const workerSelect = document.getElementById('worker-select-' + e.Event_ID);
-        const errEl = document.getElementById('event-error-' + e.Event_ID);
-        const refreshDispatchEnabled_ = () => {
-            dispatchBtn.disabled = selected.size === 0 || !workerSelect.value;
-        };
-
-        // Auto-preselect exactly the server's own recommended set (alloc.bedIds)
-        // -- this used to be recomputed client-side (first N of the candidate
-        // pool); now it's just whatever BedAllocationEngine.gs already decided,
-        // so there's no way for the two to disagree. A manager can still
-        // deselect/reselect any bed in candidateBedIds -- this only changes
-        // the DEFAULT, not what's choosable.
-        recommended.forEach(bedId => selected.add(bedId));
-        bedGrid.querySelectorAll('.chip').forEach(chip => {
-            if(selected.has(chip.dataset.bed)) chip.classList.add('selected');
-        });
-        if(selected.size > 0){
-            countEl.textContent = selected.size + ' bed' + (selected.size === 1 ? '' : 's') + ' selected (auto, max ' + cap + ') -- click to override';
-        } else {
-            countEl.textContent = '0 beds selected' + (cap ? ' (max ' + cap + ')' : '');
-        }
-        refreshDispatchEnabled_();
-        bedGrid.addEventListener('click', (ev) => {
-            const chip = ev.target.closest('.chip');
-            if(!chip || !bedGrid.contains(chip)) return;
-            const bedId = chip.dataset.bed;
-            if(selected.has(bedId)){
-                selected.delete(bedId); chip.classList.remove('selected');
-                if(errEl) errEl.textContent = '';
-            } else {
-                // Enforce the same per-wave cap the auto-allocator respects --
-                // a manual override can still pick WHICH beds, but not MORE
-                // beds than the rule allows.
-                if(cap && selected.size >= cap){
-                    if(errEl) errEl.textContent = `This wave is capped at ${cap} bed${cap === 1 ? '' : 's'} -- deselect one before adding another.`;
-                    return;
-                }
-                selected.add(bedId); chip.classList.add('selected');
-                if(errEl) errEl.textContent = '';
-            }
-            countEl.textContent = selected.size + ' bed' + (selected.size === 1 ? '' : 's') + ' selected' + (cap ? ' (max ' + cap + ')' : '');
-            refreshDispatchEnabled_();
-        });
-        workerSelect.addEventListener('change', refreshDispatchEnabled_);
-        dispatchBtn.onclick = () => dispatchEvent_(e, Array.from(selected), workerSelect.value);
-    }
-
+    // "Preview & Dispatch" on a Planned Events card no longer previews or
+    // dispatches anything itself -- it hands off to the Crop Planting
+    // Profile modal (openCropProfile_, below), landing straight on this
+    // exact event's row inside its wave, where the real preview-planting-
+    // allocation -> auto-dispatch-planting-event chain lives. See this
+    // section's own header comment for why.
     function wireEventCard_(e){
-        const previewBtn = document.getElementById('preview-alloc-btn-' + e.Event_ID);
-        if(!previewBtn) return;
-        // Already cached from earlier this session (card re-rendered, e.g.
-        // after a refresh) -- skip the button, go straight to the grid.
-        if(allocationPreviewCache_[e.Event_ID]){
-            renderBedAllocation_(e);
-            return;
-        }
-        previewBtn.addEventListener('click', () => renderBedAllocation_(e), { once: true });
-    }
-
-    /* Dispatch Event -- calls 'dispatch-planting-event' (DateEngine.gs),
-       which reuses the EXISTING create-cohort -> dispatch-task chain rather
-       than writing BED_MASTER directly:
-         1. createCohort_ mints one COHORT_MASTER row for this dispatch.
-         2. handleDispatchTask_ runs once per assigned bed -- the same
-            function ranch_aab.html's manual dispatch already calls, which
-            is why a worker is required here: it writes a PLANNED
-            FIELD_LIVE_SESSION row for that worker, exactly like any other
-            dispatched task.
-         3. This PLANTING_EVENTS row flips to DISPATCHED with Assigned_Beds
-            populated (only for beds that actually succeeded -- see
-            DateEngine.gs's own header comment on partial failure).
-       IMPORTANT: this does NOT move a bed to Growing immediately -- that
-       still only happens once the worker starts the session and a manager
-       runs Verify & Lock DOB, same as every other planting on this ranch. */
-    async function dispatchEvent_(e, bedIds, workerId){
-        const managerId = SESSION && SESSION.workerId;
-        if(!managerId){ alert('Your session expired -- please sign in again.'); signOut_(); return; }
-        const errEl = document.getElementById('event-error-' + e.Event_ID);
         const btn = document.getElementById('dispatch-btn-' + e.Event_ID);
-        errEl.textContent = '';
-        btn.disabled = true; btn.textContent = 'Dispatching…';
-        try {
-            const res = await callApi_(APPS_SCRIPT_URL, 'dispatch-planting-event', { managerId, eventId: e.Event_ID, bedIds, workerId });
-            if(!res.success) throw new Error(res.error || 'Server rejected the request.');
-            if(res.partial){
-                errEl.textContent = 'Some beds could not be dispatched: ' + res.failures.map(f => f.bedId + ' (' + f.error + ')').join('; ');
-            }
-            await connectLive(APPS_SCRIPT_URL, { silent: true });
-        } catch(err){
-            errEl.textContent = 'Could not dispatch: ' + err.message;
-            btn.disabled = false; btn.textContent = 'Dispatch Event';
-        }
+        if(!btn) return;
+        btn.addEventListener('click', () => openCropProfile_(e.Crop_ID, e.Event_ID));
     }
 
     /* ======================================================================
@@ -1076,7 +955,13 @@
         return (startDay === endDay) ? ('Day ' + startDay) : ('Day ' + startDay + '–' + endDay);
     }
 
-    async function openCropProfile_(cropId){
+    // focusEventId (optional) -- set when opened from a Planned Events
+    // card ("Preview & Dispatch" there just calls this): once the profile
+    // loads, scroll straight to that event's row inside its wave and open
+    // its own inline preview, so the manager lands on exactly the
+    // dispatch they asked for instead of having to re-find it among every
+    // wave/event this crop has.
+    async function openCropProfile_(cropId, focusEventId){
         const overlay = document.getElementById('profile-overlay');
         const titleEl = document.getElementById('profile-title');
         const subEl = document.getElementById('profile-sub');
@@ -1090,9 +975,29 @@
             const res = await callApi_(APPS_SCRIPT_URL, 'get-crop-planting-profile', { cropId });
             if(!res.success) throw new Error(res.error || 'Server returned an error');
             renderCropProfileBody_(res);
+            if(focusEventId) focusWaveEvent_(focusEventId);
         } catch(err){
             bodyEl.innerHTML = `<div class="empty-note">Could not load profile: ${err.message}</div>`;
         }
+    }
+
+    // Scrolls to and highlights one wave-event row inside the just-rendered
+    // profile, then auto-opens its inline dispatch preview (equivalent to
+    // clicking its own "Preview & Dispatch" button) so a manager who
+    // arrived here from the Planned Events tab doesn't have to click twice.
+    // No-op (quietly) if the event isn't PLANNED anymore or isn't in this
+    // crop's wave schedule -- the profile itself is still fully usable.
+    function focusWaveEvent_(eventId){
+        const row = document.getElementById('wave-event-' + eventId);
+        if(!row) return;
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const card = row.closest('.wave-card');
+        if(card){
+            card.classList.add('focus-highlight');
+            setTimeout(() => card.classList.remove('focus-highlight'), 3000);
+        }
+        const previewBtn = row.querySelector('[data-preview-event]');
+        if(previewBtn) previewBtn.click();
     }
 
     function closeCropProfile_(){
@@ -1168,7 +1073,7 @@
     function waveEventRowHtml_(e, w){
         const dateStr = fmtDate_(e.plannedDate);
         if(e.status !== 'PLANNED'){
-            return `<div class="wave-event-row">
+            return `<div class="wave-event-row" id="wave-event-${e.eventId}">
                 <span>${e.activity} — ${dateStr}</span>
                 <span class="wave-event-status ${e.status}">${e.status}</span>
                 <span style="color:var(--text-muted);">${e.assignedBeds || ''}${e.cohortId ? ' · ' + e.cohortId : ''}</span>
