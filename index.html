@@ -439,6 +439,16 @@
 
     const API_TIMEOUT_MS = 45000;
 
+    /* NOTE (2026-09-09 diagnostic pass): this used to collapse every
+       non-abort failure -- a real network error, a non-2xx HTTP status, AND
+       a JSON.parse failure on a response that DID arrive (e.g. Apps Script
+       returning its own HTML error/login-redirect page instead of JSON,
+       which happens when a request errors out or exceeds execution limits)
+       -- into one generic "Could not reach that URL" message. That message
+       is only accurate for the first case. The other two mean the request
+       DID reach the server; something on the server side failed or the
+       response wasn't parseable. Splitting these out so the real cause
+       shows up in the UI instead of always blaming connectivity. */
     function callApi_(url, action, payload){
         return new Promise((resolve, reject) => {
             if(!url){ reject(new Error('No Apps Script URL configured')); return; }
@@ -449,8 +459,37 @@
                 headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                 body: JSON.stringify({ action, payload: payload || {} }),
                 signal: controller.signal
-            }).then(res => res.json()).then(data => { clearTimeout(timer); resolve(data); })
-              .catch(err => { clearTimeout(timer); reject(new Error(err && err.name === 'AbortError' ? 'Timed out reaching the Apps Script Web App' : 'Could not reach that URL')); });
+            }).then(res => {
+                if(!res.ok){
+                    return res.text().then(bodyText => {
+                        throw new Error('Apps Script returned HTTP ' + res.status + ': ' + (bodyText || '').slice(0, 200));
+                    });
+                }
+                return res.text();
+            }).then(bodyText => {
+                clearTimeout(timer);
+                let data;
+                try { data = JSON.parse(bodyText); }
+                catch(parseErr){
+                    // Got a response, but it wasn't JSON -- usually Apps
+                    // Script's own error page (execution error, exceeded
+                    // quota, or an auth/login redirect), not a network
+                    // failure. Surface a snippet so it's actionable.
+                    throw new Error('Server returned a non-JSON response (likely an Apps Script execution error or an auth redirect): ' + bodyText.slice(0, 200));
+                }
+                resolve(data);
+            }).catch(err => {
+                clearTimeout(timer);
+                if(err && err.name === 'AbortError'){
+                    reject(new Error('Timed out reaching the Apps Script Web App'));
+                } else if(err instanceof TypeError){
+                    // fetch() itself only throws TypeError for genuine
+                    // network-level failures (DNS, CORS, offline, etc.)
+                    reject(new Error('Could not reach that URL'));
+                } else {
+                    reject(err);
+                }
+            });
         });
     }
 
@@ -581,45 +620,22 @@
     }
 
     /* ======================================================================
-       FACILITY MAPPING -- Target_Facility isn't a column on BED_MASTER;
-       it's derived the same way the physical ranch actually organizes beds
-       (CROP_ZONING_REFERENCE / BED_MASTER.Zone_Type text): B1-B4 are open
-       field blocks, Z5 is the perennial block, GHx benches are heated
-       greenhouse, HTx rows are unheated high tunnel. Mirrored server-side
-       in PlanningEngine.gs's facilityForBed_ so a bed's candidacy is judged
-       the same way in both places.
+       BED ALLOCATION (2026-09-09 refactor) -- this used to compute
+       Target_Facility/home-block/candidate-beds/BedsPerWave locally
+       (facilityForBed_, resolveCropHomeBedBlock_, candidateBedsForEvent_,
+       bedsPerWaveForEvent_ -- four client-side copies of logic that
+       already lives in BedAllocationEngine.gs, kept "identical branch-
+       for-branch" only by comment discipline, with no way to catch drift
+       if the server-side rule ever changed without someone remembering to
+       mirror it here). Replaced with a single call to the EXISTING
+       'preview-planting-allocation' action (BedAllocationEngine.gs),
+       which was already built for exactly this -- "show a manager the
+       auto-picked beds BEFORE committing to dispatch" -- just not wired
+       up to this tab yet. Lazy + cached (see renderBedAllocation_ below)
+       so opening the Planned Events tab doesn't fire one request per
+       visible card.
        ====================================================================== */
-    function facilityForBed_(bed){
-        if(!bed) return null;
-        const block = String(bed.Block_ID || '').toUpperCase();
-        if(block === 'Z5') return 'OPEN_FIELD_PERENNIAL';
-        if(block.startsWith('GH')) return 'GREENHOUSE_HEATED';
-        if(block.startsWith('HT')) return 'HIGH_TUNNEL_UNHEATED';
-        if(block.startsWith('B')) return 'OPEN_FIELD';
-        return null;
-    }
-
-    /* ======================================================================
-       HOME-BLOCK MAPPING (2026-09-09) -- same fix as BedAllocationEngine.gs's
-       resolveCropHomeBedBlock_, kept as its own client-side copy for the same
-       reason facilityForBed_ already is: this must stay identical branch-for-
-       branch with the server-side version so a bed's candidacy reads the same
-       in both places. Target_Facility alone is a 4-value bucket (OPEN_FIELD
-       spans all of B1-B4, 220 beds) -- it was never enough to keep a crop in
-       its own rotation block. This resolves a crop's CROP_REFERENCE.
-       Default_Block_ID (BLK-0X namespace) to the real BED_MASTER block
-       (B1-B4/Z5) the same way createCohort_/cohortBlockIdForBed_ already do
-       server-side. Returns null for greenhouse/high-tunnel-only crops (no
-       BLK-0X code exists for those) -- callers fall back to facility-only
-       filtering for those, unchanged from before this pass.
-       ====================================================================== */
-    const COHORT_BLOCK_TO_BED_BLOCK_ = { 'BLK-01':'B1', 'BLK-02':'B2', 'BLK-03':'B3', 'BLK-04':'B4', 'Z5':'Z5' };
-    function resolveCropHomeBedBlock_(cropId){
-        const ref = (DATA && DATA.crop_reference) || [];
-        const crop = ref.find(c => c.Crop_ID === cropId);
-        if(!crop || !crop.Default_Block_ID) return null;
-        return COHORT_BLOCK_TO_BED_BLOCK_[String(crop.Default_Block_ID).toUpperCase()] || null;
-    }
+    const allocationPreviewCache_ = {}; // eventId -> the resolved preview-planting-allocation response, for this session only
 
     function cropName_(cropId){
         const ref = (DATA && DATA.crop_reference) || [];
@@ -683,7 +699,9 @@
             <div class="event-row"><span class="k">Planned Date</span><span>${fmtDate_(e.Planned_Date)}</span></div>
             <div class="event-row"><span class="k">Target Facility</span><span>${e.Target_Facility}</span></div>
             <div class="field-label">Assign Beds (Rest, ${e.Target_Facility})</div>
-            <div class="chip-grid" id="bed-grid-${e.Event_ID}"></div>
+            <div class="chip-grid" id="bed-grid-${e.Event_ID}">
+                <button type="button" class="btn" id="preview-alloc-btn-${e.Event_ID}" style="font-size:12px;">Preview Bed Allocation</button>
+            </div>
             <div class="field-label">Assign Worker</div>
             <select id="worker-select-${e.Event_ID}">
                 <option value="">Choose a worker…</option>
@@ -691,75 +709,74 @@
             </select>
             <div class="event-card-actions">
                 <button class="btn btn-primary" id="dispatch-btn-${e.Event_ID}" disabled>Dispatch Event</button>
-                <span class="sub" id="bed-count-${e.Event_ID}" style="font-size:11px; color:var(--text-muted);">0 beds selected</span>
+                <span class="sub" id="bed-count-${e.Event_ID}" style="font-size:11px; color:var(--text-muted);">Beds not previewed yet</span>
             </div>
             <div class="event-form-error" id="event-error-${e.Event_ID}"></div>
         </div>`;
     }
 
-    function candidateBedsForEvent_(e){
-        const beds = (DATA && DATA.bed_master) || [];
-        const homeBlock = resolveCropHomeBedBlock_(e.Crop_ID);
-        return beds.filter(b => b.Current_State === 'Rest'
-            && facilityForBed_(b) === e.Target_Facility
-            && (!homeBlock || b.Block_ID === homeBlock))
-            .sort((a,b) => String(a.Bed_ID).localeCompare(String(b.Bed_ID)));
-    }
-
-    // BedsPerWave cap (2026-09-09) -- same column BedAllocationEngine.gs's
-    // getBedsPerWaveForEvent_ reads server-side (CROP_PLANTING_RULES,
-    // looked up via the event's Rule_ID). Returns null (uncapped) if the
-    // rule or the column is missing, never zero -- a missing cap must not
-    // silently block every selection.
-    function bedsPerWaveForEvent_(e){
-        const rules = (DATA && DATA.planting_rules) || [];
-        const rule = rules.find(r => r.Rule_ID === e.Rule_ID);
-        if(!rule) return null;
-        const n = Number(rule.BedsPerWave);
-        return (rule.BedsPerWave && !isNaN(n) && n > 0) ? n : null;
-    }
-
-    function wireEventCard_(e){
+    // Fetches (or reuses a cached) preview-planting-allocation result for
+    // this event, then renders the bed grid + wires selection/dispatch.
+    // Called from the "Preview Bed Allocation" button, NOT on card render
+    // -- opening the Planned Events tab with several PLANNED events used
+    // to fire one of these per visible card immediately (candidateBedsForEvent_
+    // used to run synchronously, client-side, for every card at once).
+    // Now it's one network call per event, only when a manager actually
+    // wants to see/assign beds for that specific card, and only once per
+    // session per event (cached in allocationPreviewCache_) -- toggling
+    // back to a tab you've already previewed doesn't re-hit the backend.
+    async function renderBedAllocation_(e){
         const bedGrid = document.getElementById('bed-grid-' + e.Event_ID);
         const bedLabel = document.querySelector('#event-card-' + e.Event_ID + ' .field-label');
-        const candidates = candidateBedsForEvent_(e);
-        const homeBlock = resolveCropHomeBedBlock_(e.Crop_ID);
-        const cap = bedsPerWaveForEvent_(e);
+        const countEl = document.getElementById('bed-count-' + e.Event_ID);
+
+        let alloc = allocationPreviewCache_[e.Event_ID];
+        if(!alloc){
+            bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--text-muted);">Loading candidate beds…</div>`;
+            try {
+                const res = await callApi_(APPS_SCRIPT_URL, 'preview-planting-allocation', { eventId: e.Event_ID });
+                if(!res.success) throw new Error(res.error || 'Server returned an error');
+                alloc = res;
+                allocationPreviewCache_[e.Event_ID] = res;
+            } catch(err){
+                bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--status-red);">Could not load bed allocation: ${err.message}</div>`;
+                return;
+            }
+        }
+
+        const candidateIds = alloc.candidateBedIds || [];
+        const recommended = new Set(alloc.bedIds || []);
+        const homeBlock = alloc.homeBlock;
+        const cap = alloc.cap;
+
         if(bedLabel){
             bedLabel.textContent = 'Assign Beds (Rest, ' + e.Target_Facility + (homeBlock ? ', Block ' + homeBlock : '') + (cap ? ' -- max ' + cap + '/wave' : '') + ')';
         }
-        if(!candidates.length){
+        if(!candidateIds.length){
             bedGrid.innerHTML = `<div class="sub" style="font-size:11.5px; color:var(--text-muted);">No Rest beds currently match ${e.Target_Facility}${homeBlock ? ' in Block ' + homeBlock : ''}.</div>`;
             return;
         }
-        bedGrid.innerHTML = candidates.map(b => `<button type="button" class="chip" data-bed="${b.Bed_ID}">${b.Bed_ID}</button>`).join('');
+
+        bedGrid.innerHTML = candidateIds.map(bedId => `<button type="button" class="chip" data-bed="${bedId}">${bedId}</button>`).join('');
         const selected = new Set();
         const dispatchBtn = document.getElementById('dispatch-btn-' + e.Event_ID);
-        const countEl = document.getElementById('bed-count-' + e.Event_ID);
         const workerSelect = document.getElementById('worker-select-' + e.Event_ID);
         const errEl = document.getElementById('event-error-' + e.Event_ID);
         const refreshDispatchEnabled_ = () => {
             dispatchBtn.disabled = selected.size === 0 || !workerSelect.value;
         };
-        // Auto-preselect (2026-09-09) -- same allocation BedAllocationEngine.gs's
-        // allocateBedsForPlantingEvent_ computes server-side (first N of the
-        // already-correct facility+block-filtered pool, sorted by Bed_ID, N =
-        // BedsPerWave), applied here client-side so the grid opens already
-        // showing the recommended range (e.g. B2-01..B2-05 for a 5-bed Sukuma
-        // wave) instead of an unfiltered 55-bed pool waiting to be hand-picked.
-        // Deliberately NOT baked into PLANTING_EVENTS.Bed_Range at generation
-        // time -- see this file's own note on why that would go stale between
-        // generation and dispatch (another event could claim one of these beds
-        // in the meantime); this recomputes fresh, every render, off the live
-        // candidate pool. A manager can still deselect/reselect any bed within
-        // the same block+facility -- this only changes the DEFAULT, not what's
-        // choosable.
-        const preselectCount = cap ? Math.min(cap, candidates.length) : 0;
-        candidates.slice(0, preselectCount).forEach(b => selected.add(b.Bed_ID));
+
+        // Auto-preselect exactly the server's own recommended set (alloc.bedIds)
+        // -- this used to be recomputed client-side (first N of the candidate
+        // pool); now it's just whatever BedAllocationEngine.gs already decided,
+        // so there's no way for the two to disagree. A manager can still
+        // deselect/reselect any bed in candidateBedIds -- this only changes
+        // the DEFAULT, not what's choosable.
+        recommended.forEach(bedId => selected.add(bedId));
         bedGrid.querySelectorAll('.chip').forEach(chip => {
             if(selected.has(chip.dataset.bed)) chip.classList.add('selected');
         });
-        if(preselectCount > 0){
+        if(selected.size > 0){
             countEl.textContent = selected.size + ' bed' + (selected.size === 1 ? '' : 's') + ' selected (auto, max ' + cap + ') -- click to override';
         } else {
             countEl.textContent = '0 beds selected' + (cap ? ' (max ' + cap + ')' : '');
@@ -788,6 +805,18 @@
         });
         workerSelect.addEventListener('change', refreshDispatchEnabled_);
         dispatchBtn.onclick = () => dispatchEvent_(e, Array.from(selected), workerSelect.value);
+    }
+
+    function wireEventCard_(e){
+        const previewBtn = document.getElementById('preview-alloc-btn-' + e.Event_ID);
+        if(!previewBtn) return;
+        // Already cached from earlier this session (card re-rendered, e.g.
+        // after a refresh) -- skip the button, go straight to the grid.
+        if(allocationPreviewCache_[e.Event_ID]){
+            renderBedAllocation_(e);
+            return;
+        }
+        previewBtn.addEventListener('click', () => renderBedAllocation_(e), { once: true });
     }
 
     /* Dispatch Event -- calls 'dispatch-planting-event' (DateEngine.gs),
