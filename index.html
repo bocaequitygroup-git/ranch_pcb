@@ -2,21 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Ngapori Ranch - PCB Planner / Command Board</title>
+<title>Ngapori Ranch - PCB Cohort Timeline</title>
 <style>
     /* ==========================================================================
        Same design system as ranch_aab.html / WorkerApp.html (same CSS vars,
-       chip-grid pattern, conn-pill/conn-panel, login gate) so this reads as
-       part of the same app suite rather than a bolted-on tool. PCB is the
-       "strategic brain" companion to AAB's "daily execution" board: it reads
-       CROP_PLANTING_RULES -> PLANTING_EVENTS (the new Rules-to-Events engine's
-       staging layer) and turns a PLANNED event into a real COHORT_MASTER +
-       BED_MASTER assignment, at which point it becomes exactly the kind of
-       task AAB/WorkerApp already know how to display and dispatch. PCB never
-       writes BED_MASTER/COHORT_MASTER itself in a way AAB doesn't already
-       understand -- "Dispatch Event" below calls the same createCohort_ used
-       by AAB's own New Cohort step, then updates BED_MASTER state exactly the
-       way handleDispatchTask_ already does for a manually-dispatched planting.
+       conn-pill/conn-panel, login gate) so this reads as part of the same app
+       suite. PCB CORE SHIFT (2026-09-10): this board used to read
+       CROP_PLANTING_RULES -> PLANTING_EVENTS (crop-wave planning). It now
+       reads COHORT_MASTER (+ FIELD_BLOCK_OCCUPANCY for harvest-end/block
+       refinement) and renders a per-cohort Gantt timeline instead. The old
+       Planned Events / Succession Timeline / Batch Generator / Block Map /
+       Spatial Grid views and the Crop Planting Profile modal are removed --
+       all of them existed to visualize or generate CROP_PLANTING_RULES rows,
+       which are out of scope for this board now. Field mapping locked in
+       with the ranch owner 2026-09-10 (see loadCohortBoard_ and
+       deriveCohortRow_ below for the exact column contract).
        ========================================================================== */
     :root {
         --bg-dark: #0f1416;
@@ -57,8 +57,9 @@
     .btn:disabled{opacity:.35; cursor:not-allowed;}
     .btn-primary{background:var(--status-green); border-color:var(--status-green); color:#08110a;}
     .btn-primary:hover{filter:brightness(1.08);}
-    .btn-primary:disabled{background:var(--status-gray); border-color:var(--status-gray); color:var(--text-muted);}
     .hidden{ display:none !important; }
+    .spin{ display:inline-block; animation: spin 1s linear infinite; }
+    @keyframes spin{ from{transform:rotate(0);} to{transform:rotate(360deg);} }
 
     /* login gate -- identical Manager/Founder-only pattern as ranch_aab.html */
     #login-screen{ position:fixed; inset:0; background:var(--bg-dark); display:flex; align-items:center; justify-content:center; z-index:100; }
@@ -73,151 +74,85 @@
     #login-advanced{ max-height:0; overflow:hidden; transition:max-height .2s ease; }
     #login-advanced.open{ max-height:140px; margin-top:10px; }
 
-    /* pipeline widget -- "Next 14 Days Planting Pipeline" summary strip.
-       Same component also documented standalone for DashboardAPI.gs/
-       Dashboard_VPOS.html in PlanningEngine.gs's header comment, since no
-       existing dashboard file was provided to edit directly. */
-    #pipeline-widget{ display:flex; gap:14px; flex-wrap:wrap; align-items:center; padding:12px 24px; background:var(--panel-bg); border-bottom:1px solid var(--border-color); }
-    #pipeline-widget .pipeline-title{ font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em; }
-    .pipeline-chip{ display:flex; align-items:center; gap:6px; font-size:12px; background:rgba(255,255,255,0.04); border:1px solid var(--border-color); border-radius:14px; padding:5px 12px; }
-    .pipeline-chip b{ font-size:13px; }
-    .pipeline-chip .dot{ width:7px; height:7px; border-radius:50%; }
-
-    /* tabs */
-    .tab-bar{ display:flex; gap:6px; padding:10px 24px; background:var(--panel-bg); border-bottom:1px solid var(--border-color); flex-wrap:wrap; }
-    .tab-btn{ font-size:12px; font-weight:700; padding:7px 16px; border-radius:16px; border:1px solid var(--border-color); background:rgba(255,255,255,0.03); color:var(--text-muted); cursor:pointer; }
-    .tab-btn:hover{ background:rgba(255,255,255,0.09); color:var(--text-main); }
-    .tab-btn.active{ background:var(--text-main); color:#0f1416; border-color:var(--text-main); }
-    .view{ padding:20px 24px; display:none; }
-    .view.active{ display:block; }
-
-    /* event cards */
-    #events-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:14px; }
-    .event-card{ background:var(--panel-bg); border:1px solid var(--border-color); border-radius:10px; padding:14px; }
-    .event-card-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px; }
-    .event-crop{ font-size:15px; font-weight:800; }
-    .event-crop .code{ font-family:monospace; font-size:11px; color:var(--text-muted); font-weight:400; margin-left:6px; }
-    .event-status{ font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:10px; text-transform:uppercase; letter-spacing:.03em; white-space:nowrap; }
-    .event-status.PLANNED{ background:rgba(33,150,243,0.18); color:#64b5f6; }
-    .event-status.DISPATCHED{ background:rgba(67,160,71,0.18); color:#81c784; }
-    .event-wave{ display:inline-block; font-size:10.5px; color:var(--text-muted); background:rgba(255,255,255,0.05); border-radius:10px; padding:2px 9px; margin-bottom:10px; }
-    .event-row{ display:flex; justify-content:space-between; font-size:12px; padding:4px 0; border-bottom:1px solid var(--border-color); }
-    .event-row .k{ color:var(--text-muted); }
-    .event-card .field-label{ font-size:10px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.03em; margin:12px 0 6px; }
-    .event-card select{ width:100%; box-sizing:border-box; font-size:12.5px; padding:8px 10px; border-radius:6px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); font-family:inherit; }
-    .chip-grid{ display:flex; flex-wrap:wrap; gap:6px; }
-    .chip{ font-size:11px; font-weight:600; padding:6px 11px; border-radius:14px; border:1px solid var(--border-color); background:rgba(255,255,255,0.04); color:var(--text-main); cursor:pointer; line-height:1.3; }
-    .chip:hover{ background:rgba(255,255,255,0.11); }
-    .chip.selected{ background:var(--status-green); border-color:var(--status-green); color:#08110a; font-weight:700; }
-    .chip:disabled{ opacity:.3; cursor:not-allowed; }
-    .event-card-actions{ display:flex; gap:8px; margin-top:12px; align-items:center; }
-    .event-form-error{ color:#ff8a80; font-size:11px; margin-top:8px; min-height:0; }
-    .event-form-error:empty{ display:none; }
-    .empty-note{ color:var(--text-muted); font-size:12.5px; padding:30px; text-align:center; border:1px dashed var(--border-color); border-radius:10px; }
-
-    /* timeline */
-    .timeline-row{ display:grid; grid-template-columns:190px 1fr; gap:10px; align-items:center; padding:8px 0; border-bottom:1px solid var(--border-color); }
-    .timeline-label{ font-size:12px; }
-    .timeline-label .wave{ display:block; font-size:10px; color:var(--text-muted); }
-    .timeline-track{ position:relative; height:22px; background:rgba(255,255,255,0.03); border-radius:4px; }
-    .timeline-bar{ position:absolute; top:3px; height:16px; border-radius:8px; background:var(--status-blue); opacity:.55; }
-    .timeline-marker{ position:absolute; top:-2px; width:2px; height:26px; background:var(--status-green); }
-    .timeline-marker.DISPATCHED{ background:var(--text-muted); }
-    .timeline-axis{ display:grid; grid-template-columns:190px 1fr; font-size:9.5px; color:var(--text-muted); margin-bottom:6px; }
-    .timeline-axis-track{ position:relative; height:14px; }
-    .timeline-axis-tick{ position:absolute; top:0; transform:translateX(-50%); }
-
-    /* spatial grid (mirrors ranch_aab.html's bed layout) */
-    .canvas-container{ padding:6px 0 16px; display:flex; justify-content:center; overflow-x:auto; }
-    svg{ background:#12181a; border:1px solid var(--border-color); border-radius:8px; }
-    .block-label{ fill: var(--text-muted); font-size: 11px; font-weight: bold; font-family: monospace; }
-    .bed-rect{ fill:#0f1416; stroke-width:2; rx:3; }
-    .bed-text{ fill:var(--text-main); font-size:8px; font-weight:bold; text-anchor:middle; font-family:monospace; }
-    .grid-legend{ display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--text-muted); margin-bottom:10px; }
-    .grid-legend span.sw{ display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; vertical-align:middle; }
-
-    /* batch generator */
-    .form-grid{ display:grid; grid-template-columns:1fr 1fr; gap:20px; max-width:900px; }
-    .form-card{ background:var(--panel-bg); border:1px solid var(--border-color); border-radius:10px; padding:16px; }
-    .field-label{ font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.03em; margin:14px 0 6px; }
-    .field-label:first-child{ margin-top:0; }
-    .form-card input, .form-card select{ width:100%; box-sizing:border-box; font-size:12.5px; padding:8px 10px; border-radius:6px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); font-family:inherit; }
-    .preview-row{ display:flex; justify-content:space-between; font-size:12px; padding:6px 0; border-bottom:1px solid var(--border-color); }
-    .preview-row .tag{ font-size:9.5px; color:var(--text-muted); }
-    #batch-json{ width:100%; box-sizing:border-box; min-height:110px; font-family:monospace; font-size:11px; background:#0f1416; color:#a5d6a7; border:1px solid var(--border-color); border-radius:6px; padding:10px; margin-top:8px; }
-
     .queue-warning{ display:none; background:rgba(251,140,0,0.12); border-bottom:1px solid var(--status-orange); color:#ffcc80; font-size:12px; padding:8px 24px; }
     .queue-warning.show{ display:block; }
 
-    /* ======================================================================
-       BLOCK MAP (Block Intelligence Board) -- replaces the raw per-bed chip
-       list with crop LANES (contiguous bed ranges sharing one cohort), per
-       BlockIntelligenceEngine.gs's getBlockCropLanes_. See that file's
-       header comment for why lanes are computed live off BED_MASTER rather
-       than stored as a fixed crop->bed map.
-       ====================================================================== */
-    .block-pill-row{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
-    .block-pill{ font-size:12px; font-weight:700; padding:8px 16px; border-radius:18px; border:1px solid var(--border-color); background:rgba(255,255,255,0.03); color:var(--text-muted); cursor:pointer; }
-    .block-pill:hover{ background:rgba(255,255,255,0.09); color:var(--text-main); }
-    .block-pill.active{ background:var(--text-main); color:#0f1416; border-color:var(--text-main); }
-    .block-header{ background:var(--panel-bg); border:1px solid var(--border-color); border-radius:10px; padding:16px 18px; margin-bottom:16px; }
-    .block-header h2{ margin:0 0 4px; font-size:16px; }
-    .block-header .sub{ color:var(--text-muted); font-size:12px; margin-bottom:10px; }
-    .block-meta-row{ display:flex; gap:18px; flex-wrap:wrap; font-size:11.5px; color:var(--text-muted); }
-    .block-meta-row b{ color:var(--text-main); }
-    .lane-list{ display:flex; flex-direction:column; gap:8px; margin-bottom:18px; }
-    .lane-row{ display:flex; align-items:center; gap:12px; background:var(--panel-bg); border:1px solid var(--border-color); border-radius:8px; padding:11px 14px; }
-    .lane-row.clickable{ cursor:pointer; }
-    .lane-row.clickable:hover{ border-color:var(--text-main); background:rgba(255,255,255,0.06); }
-    .lane-swatch{ width:8px; align-self:stretch; border-radius:4px; flex:none; min-height:20px; }
-    .lane-body{ flex:1; min-width:0; }
-    .lane-crop{ font-size:13.5px; font-weight:700; }
-    .lane-crop .code{ font-family:monospace; font-size:10.5px; color:var(--text-muted); font-weight:400; margin-left:6px; }
-    .lane-beds{ font-size:11.5px; color:var(--text-muted); margin-top:2px; }
-    .lane-state-tag{ font-size:9.5px; font-weight:700; padding:3px 9px; border-radius:10px; text-transform:uppercase; letter-spacing:.03em; white-space:nowrap; flex:none; }
-    .inactive-crops-wrap{ margin-top:6px; }
-    .inactive-crops-wrap .field-label{ margin-bottom:8px; }
+    /* ---------------------------- FILTER BAR ---------------------------- */
+    #filter-bar{ display:flex; flex-wrap:wrap; gap:18px; align-items:flex-start; padding:14px 24px; background:var(--panel-bg); border-bottom:1px solid var(--border-color); }
+    .filter-group{ display:flex; flex-direction:column; gap:6px; }
+    .filter-group-label{ font-size:10px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em; }
+    #crop-chip-grid{ display:flex; flex-wrap:wrap; gap:6px; max-width:520px; }
+    .crop-chip{ font-size:11px; font-weight:600; padding:5px 11px; border-radius:14px; border:1px solid var(--border-color); background:rgba(255,255,255,0.04); color:var(--text-main); cursor:pointer; line-height:1.3; display:flex; align-items:center; gap:6px; }
+    .crop-chip:hover{ background:rgba(255,255,255,0.11); }
+    .crop-chip .sw{ width:8px; height:8px; border-radius:50%; flex:none; }
+    .crop-chip.selected{ background:var(--text-main); color:#0f1416; border-color:var(--text-main); font-weight:700; }
+    .filter-group select, .filter-group input[type="date"]{ font-size:12px; padding:7px 10px; border-radius:8px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); font-family:inherit; }
+    .date-range-inputs{ display:flex; align-items:center; gap:6px; }
+    .date-range-inputs span{ font-size:11px; color:var(--text-muted); }
+    #filter-reset-btn{ align-self:flex-end; }
+    #filter-count{ font-size:11px; color:var(--text-muted); align-self:flex-end; padding-bottom:7px; }
 
-    /* ---------------------- Crop Planting Profile modal ---------------------- */
-    #profile-overlay{ position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200; display:none; align-items:flex-start; justify-content:center; overflow-y:auto; padding:30px 16px; }
-    #profile-overlay.open{ display:flex; }
-    #profile-modal{ background:var(--panel-bg); border:1px solid var(--border-color); border-radius:12px; width:100%; max-width:720px; padding:22px 24px 26px; }
-    .profile-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:4px; }
-    .profile-title{ font-size:19px; font-weight:800; }
-    .profile-title .code{ font-family:monospace; font-size:12px; color:var(--text-muted); font-weight:400; margin-left:8px; }
-    .profile-close-btn{ background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; line-height:1; padding:2px 6px; }
-    .profile-close-btn:hover{ color:var(--text-main); }
-    .profile-sub{ color:var(--text-muted); font-size:12px; margin-bottom:16px; }
-    .profile-section{ margin-bottom:18px; }
-    .profile-section-title{ font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px; border-bottom:1px solid var(--border-color); padding-bottom:6px; }
-    .profile-kv-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px 18px; font-size:12.5px; }
-    .profile-kv-grid .k{ color:var(--text-muted); }
-    .profile-note{ font-size:11.5px; color:var(--text-muted); margin-top:6px; font-style:italic; }
-    .stage-row, .cohort-row{ display:grid; grid-template-columns:1.3fr 0.8fr 0.7fr; gap:8px; font-size:12px; padding:6px 0; border-bottom:1px solid var(--border-color); }
-    .cohort-row{ grid-template-columns:1fr 0.8fr 1.2fr; }
-    .wave-card{ background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:8px; padding:12px 14px; margin-bottom:10px; transition:border-color .4s ease, box-shadow .4s ease; }
-    .wave-card.focus-highlight{ border-color:#64b5f6; box-shadow:0 0 0 2px rgba(100,181,246,0.25); }
-    .wave-card-top{ display:flex; justify-content:space-between; gap:8px; font-size:13px; font-weight:700; margin-bottom:6px; }
-    .wave-card-meta{ font-size:11px; color:var(--text-muted); margin-bottom:8px; }
-    .wave-event-row{ display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11.5px; padding:6px 0; border-top:1px dashed var(--border-color); flex-wrap:wrap; }
-    .wave-event-status{ font-size:9px; font-weight:700; padding:2px 8px; border-radius:8px; text-transform:uppercase; }
-    .wave-event-status.PLANNED{ background:rgba(33,150,243,0.18); color:#64b5f6; }
-    .wave-event-status.DISPATCHED{ background:rgba(67,160,71,0.18); color:#81c784; }
-    .dispatch-inline{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px; width:100%; }
-    .dispatch-inline select{ font-size:11.5px; padding:6px 8px; border-radius:6px; border:1px solid var(--border-color); background:rgba(255,255,255,0.05); color:var(--text-main); font-family:inherit; }
-    .dispatch-inline .btn{ padding:6px 12px; font-size:11px; }
-    .dispatch-preview-note{ font-size:11px; color:var(--text-muted); width:100%; }
-    .dispatch-error{ color:#ff8a80; font-size:11px; width:100%; }
+    /* ---------------------------- GANTT ---------------------------- */
+    #gantt-wrap{ padding:16px 24px 40px; overflow-x:auto; }
+    #gantt-inner{ min-width:900px; }
+    .gantt-axis{ display:grid; grid-template-columns:190px 1fr 92px; gap:0; margin-bottom:4px; position:sticky; top:0; }
+    .gantt-axis-track{ position:relative; height:20px; border-bottom:1px solid var(--border-color); }
+    .gantt-axis-tick{ position:absolute; top:0; bottom:0; border-left:1px solid var(--border-color); padding-left:4px; font-size:9.5px; color:var(--text-muted); white-space:nowrap; }
+    .gantt-today-line{ position:absolute; top:0; bottom:0; width:2px; background:var(--status-red); z-index:2; }
+
+    .gantt-row{ display:grid; grid-template-columns:190px 1fr 92px; gap:0; align-items:center; padding:7px 0; border-bottom:1px solid var(--border-color); }
+    .gantt-label{ padding-right:10px; min-width:0; }
+    .gl-top{ display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; }
+    .gl-crop-code{ font-family:monospace; font-size:10.5px; color:var(--text-muted); font-weight:400; }
+    .gl-sub{ font-size:10.5px; color:var(--text-muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+    .gantt-track{ position:relative; height:26px; background:rgba(255,255,255,0.02); border-radius:4px; }
+    .gantt-bar{ position:absolute; top:3px; height:20px; border-radius:6px; border:1px solid; cursor:pointer; overflow:hidden; display:flex; align-items:center; padding:0 6px; gap:5px; }
+    .gantt-bar:hover{ filter:brightness(1.25); }
+    .gantt-bar-hw{ position:absolute; top:0; bottom:0; opacity:.85; }
+    .gantt-bar-badge{ position:relative; font-size:8.5px; font-weight:800; text-transform:uppercase; letter-spacing:.03em; color:#fff; text-shadow:0 1px 1px rgba(0,0,0,0.6); white-space:nowrap; }
+    .gantt-bar-facility{ position:relative; font-size:10px; line-height:1; }
+    .gantt-bar.no-dates{ background:rgba(255,255,255,0.05) !important; border-style:dashed; }
+
+    .gantt-block-tag{ font-size:10.5px; color:var(--text-muted); text-align:right; padding-left:8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+    .empty-note{ color:var(--text-muted); font-size:12.5px; padding:30px; text-align:center; border:1px dashed var(--border-color); border-radius:10px; margin:16px 24px; }
+
+    /* ---------------------------- TOOLTIP ---------------------------- */
+    #gantt-tooltip{ position:fixed; z-index:150; background:#0b1011; border:1px solid var(--border-color); border-radius:8px; padding:8px 11px; font-size:11.5px; line-height:1.5; pointer-events:none; display:none; box-shadow:0 4px 14px rgba(0,0,0,0.4); max-width:260px; }
+    #gantt-tooltip b{ display:block; font-size:12.5px; margin-bottom:2px; }
+    #gantt-tooltip .tt-row{ color:var(--text-muted); }
+    #gantt-tooltip .tt-row span{ color:var(--text-main); }
+
+    /* ---------------------------- COHORT SIDE PANEL ---------------------------- */
+    #panel-overlay{ position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:200; display:none; justify-content:flex-end; }
+    #panel-overlay.open{ display:flex; }
+    #cohort-panel{ width:100%; max-width:400px; height:100%; background:var(--panel-bg); border-left:1px solid var(--border-color); padding:22px 22px 30px; box-sizing:border-box; overflow-y:auto; }
+    .panel-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:4px; }
+    .panel-title{ font-size:18px; font-weight:800; }
+    .panel-title .code{ font-family:monospace; font-size:12px; color:var(--text-muted); font-weight:400; margin-left:8px; }
+    .panel-close-btn{ background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; line-height:1; padding:2px 6px; }
+    .panel-close-btn:hover{ color:var(--text-main); }
+    .panel-sub{ color:var(--text-muted); font-size:12px; margin-bottom:18px; }
+    .panel-badge{ display:inline-block; font-size:10px; font-weight:700; padding:4px 11px; border-radius:10px; text-transform:uppercase; letter-spacing:.03em; margin-bottom:18px; }
+    .panel-kv{ display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; font-size:12.5px; margin-bottom:18px; }
+    .panel-kv .k{ color:var(--text-muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.03em; margin-bottom:2px; }
+    .panel-kv .v{ font-weight:600; }
+    .panel-section-title{ font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em; margin:18px 0 8px; border-bottom:1px solid var(--border-color); padding-bottom:6px; }
+
+    .badge-PLANNED{ background:rgba(33,150,243,0.18); color:#64b5f6; }
+    .badge-ACTIVE{ background:rgba(67,160,71,0.18); color:#81c784; }
+    .badge-HARVESTING{ background:rgba(142,36,170,0.20); color:#ce93d8; }
+    .badge-COMPLETE{ background:rgba(120,144,156,0.20); color:#b0bec5; }
 </style>
 </head>
 <body>
 
     <!-- LOGIN GATE -- same 'login' action / Manager+Founder-only gate as
-         ranch_aab.html. Planning/dispatch is a management action, so this
-         board never lets a worker ID/PIN past the gate either. -->
+         ranch_aab.html. -->
     <div id="login-screen">
         <div id="login-card">
-            <h1>Ngapori Ranch — PCB Planner</h1>
+            <h1>Ngapori Ranch — PCB Timeline</h1>
             <div class="sub">Manager / Founder sign-in required.</div>
             <div id="login-error"></div>
             <label for="login-worker-id">User ID</label>
@@ -237,8 +172,8 @@
     <div id="app-root" style="display:none;">
     <header>
         <div>
-            <h1>NGAPORI RANCH PCB — PLANNER / COMMAND BOARD</h1>
-            <span class="sub-line">Rules-to-Events engine: CROP_PLANTING_RULES → PLANTING_EVENTS → dispatched to BED_MASTER/COHORT_MASTER</span>
+            <h1>NGAPORI RANCH PCB — COHORT TIMELINE</h1>
+            <span class="sub-line">Cohort Gantt: COHORT_MASTER + FIELD_BLOCK_OCCUPANCY -- no crop-wave rules involved</span>
         </div>
         <div style="display:flex; align-items:center; gap:12px;">
             <button class="conn-pill" id="refresh-btn" title="Refresh live data now">
@@ -269,137 +204,62 @@
         </div>
     </div>
 
-    <!-- "Next 14 Days Planting Pipeline" widget (task 3). This same summary
-         is reproduced as a standalone DashboardAPI.gs function
-         (getUpcomingPlantingPipeline_) in PlanningEngine.gs for embedding
-         into an executive Dashboard/Today view -- kept here too since PCB is
-         the natural home for it and no separate dashboard file was supplied
-         to edit directly. -->
-    <div id="pipeline-widget">
-        <span class="pipeline-title">Next 14 Days Pipeline</span>
-        <span id="pipeline-chips">
-            <span class="pipeline-chip"><span class="dot" style="background:var(--text-muted);"></span>Connect to load…</span>
-        </span>
-    </div>
-
-    <div class="tab-bar" id="tab-bar">
-        <button class="tab-btn active" data-view="blockmap">Block Map</button>
-        <button class="tab-btn" data-view="events">Planned Events</button>
-        <button class="tab-btn" data-view="timeline">Succession Timeline</button>
-        <button class="tab-btn" data-view="grid">Spatial Grid</button>
-        <button class="tab-btn" data-view="batch">Batch Generator</button>
-    </div>
-
-    <!-- ===================== VIEW 0: Block Map (Block Intelligence Board) =====================
-         Replaces a raw per-bed chip list with crop LANES: contiguous bed
-         ranges sharing one cohort (e.g. "Sukuma Wiki -- B2-01 to B2-05")
-         instead of 55 individual bed numbers. Click a lane, or an inactive
-         zoned crop chip, to open that crop's full Planting Profile, which
-         is where dispatch actually happens -- see BlockIntelligenceEngine.gs. -->
-    <div class="view active" id="view-blockmap">
-        <div class="block-pill-row" id="block-pill-row"></div>
-        <div id="block-map-body"><div class="empty-note">Connect to the Apps Script backend to load the Block Map.</div></div>
-    </div>
-
-    <!-- ===================== VIEW 1: Planned Events queue ===================== -->
-    <div class="view" id="view-events">
-        <div id="events-grid"><div class="empty-note">Connect to the Apps Script backend to load PLANTING_EVENTS.</div></div>
-    </div>
-
-    <!-- ===================== VIEW 2: Succession Timeline ===================== -->
-    <div class="view" id="view-timeline">
-        <div id="timeline-body"><div class="empty-note">Connect to load the succession schedule.</div></div>
-    </div>
-
-    <!-- ===================== VIEW 3: Spatial Grid ===================== -->
-    <div class="view" id="view-grid">
-        <div class="grid-legend">
-            <span><span class="sw" style="background:var(--status-gray); opacity:.6;"></span>Rest / available</span>
-            <span><span class="sw" style="background:var(--status-blue);"></span>Prep</span>
-            <span><span class="sw" style="background:var(--status-green);"></span>Growing / Planted</span>
-            <span><span class="sw" style="background:var(--status-purple);"></span>Harvestable</span>
-            <span><span class="sw" style="background:var(--status-amber);"></span>Cleanup</span>
+    <!-- ===================== FILTERS ===================== -->
+    <div id="filter-bar">
+        <div class="filter-group">
+            <div class="filter-group-label">Crop</div>
+            <div id="crop-chip-grid"><span class="sub-line">Connect to load crops…</span></div>
         </div>
-        <div class="canvas-container">
-            <svg id="pcb-svg" viewBox="0 0 900 340" width="900" height="340">
-                <g id="pcb-block-labels"></g>
-                <g id="pcb-beds-layer"></g>
-            </svg>
+        <div class="filter-group">
+            <div class="filter-group-label">Facility</div>
+            <select id="facility-filter">
+                <option value="ALL">All (Field + GH)</option>
+                <option value="FIELD">Field only</option>
+                <option value="GH">GH / High Tunnel only</option>
+            </select>
         </div>
-    </div>
-
-    <!-- ===================== VIEW 4: Batch Generator ===================== -->
-    <div class="view" id="view-batch">
-        <div class="form-grid">
-            <div class="form-card">
-                <div class="field-label">Crop</div>
-                <select id="batch-crop-select"><option value="">Connect to load crop reference…</option></select>
-
-                <div class="field-label">Back-schedule from</div>
-                <select id="batch-anchor-select">
-                    <option value="harvest">Target Harvest Date</option>
-                    <option value="field">Field Planting / Transplant Date</option>
-                </select>
-
-                <div class="field-label" id="batch-anchor-date-label">Target Harvest Date</div>
-                <input type="date" id="batch-anchor-date">
-
-                <div class="field-label">Days To Maturity (DTM, field → harvest)</div>
-                <input type="number" id="batch-dtm" min="1" placeholder="from CROP_REFERENCE Cycle_Days">
-
-                <div class="field-label">Nursery Days (0 if direct-sown)</div>
-                <input type="number" id="batch-nursery-days" min="0" value="0">
-
-                <div class="field-label">Target Facility</div>
-                <select id="batch-facility-select">
-                    <option value="OPEN_FIELD">OPEN_FIELD</option>
-                    <option value="HIGH_TUNNEL_UNHEATED">HIGH_TUNNEL_UNHEATED</option>
-                    <option value="GREENHOUSE_HEATED">GREENHOUSE_HEATED</option>
-                    <option value="OPEN_FIELD_PERENNIAL">OPEN_FIELD_PERENNIAL</option>
-                </select>
-
-                <div class="field-label">Succession</div>
-                <div style="display:flex; gap:10px;">
-                    <div style="flex:1;">
-                        <label style="font-size:10.5px; color:var(--text-muted);">Interval (days)</label>
-                        <input type="number" id="batch-interval-days" min="0" value="14">
-                    </div>
-                    <div style="flex:1;">
-                        <label style="font-size:10.5px; color:var(--text-muted);">Number of waves</label>
-                        <input type="number" id="batch-wave-count" min="1" value="4">
-                    </div>
-                </div>
-                <div class="field-label">Wave Name</div>
-                <input type="text" id="batch-wave-name" placeholder="e.g. Fall Succession Wave">
-
-                <div style="margin-top:16px; display:flex; gap:8px;">
-                    <button class="btn btn-primary" id="batch-preview-btn">Generate Preview</button>
-                    <button class="btn" id="batch-save-btn" disabled>Save to Planning Queue</button>
-                </div>
-                <div class="event-form-error" id="batch-error"></div>
-            </div>
-            <div class="form-card">
-                <div class="field-label" style="margin-top:0;">Preview</div>
-                <div id="batch-preview"><div class="empty-note" style="padding:16px;">Generate a preview to see computed nursery/field/harvest dates for each wave.</div></div>
-                <div id="batch-json-wrap" class="hidden">
-                    <div class="field-label">Payload (fallback — copy into your backend console if <code>generate-planting-events</code> isn't deployed yet)</div>
-                    <textarea id="batch-json" readonly></textarea>
-                </div>
+        <div class="filter-group">
+            <div class="filter-group-label">Block</div>
+            <select id="block-filter"><option value="">All blocks</option></select>
+        </div>
+        <div class="filter-group">
+            <div class="filter-group-label">Visible range</div>
+            <div class="date-range-inputs">
+                <input type="date" id="range-start-input">
+                <span>→</span>
+                <input type="date" id="range-end-input">
             </div>
         </div>
+        <button class="btn" id="filter-reset-btn">Reset filters</button>
+        <span id="filter-count"></span>
     </div>
 
-    <!-- ===================== Crop Planting Profile modal ===================== -->
-    <div id="profile-overlay">
-        <div id="profile-modal">
-            <div class="profile-top">
-                <div class="profile-title" id="profile-title">—</div>
-                <button class="profile-close-btn" id="profile-close-btn" title="Close">&times;</button>
+    <!-- ===================== GANTT ===================== -->
+    <div id="gantt-wrap">
+        <div id="gantt-inner">
+            <div class="gantt-axis">
+                <div></div>
+                <div class="gantt-axis-track" id="gantt-axis-track"></div>
+                <div></div>
             </div>
-            <div class="profile-sub" id="profile-sub"></div>
-            <div id="profile-body"><div class="empty-note">Loading…</div></div>
+            <div id="gantt-rows"><div class="empty-note">Connect to the Apps Script backend to load COHORT_MASTER.</div></div>
         </div>
     </div>
+
+    <!-- ===================== Cohort detail panel ===================== -->
+    <div id="panel-overlay">
+        <div id="cohort-panel">
+            <div class="panel-top">
+                <div class="panel-title" id="panel-title">—<span class="code" id="panel-code"></span></div>
+                <button class="panel-close-btn" id="panel-close-btn" title="Close">&times;</button>
+            </div>
+            <div class="panel-sub" id="panel-sub"></div>
+            <div id="panel-badge-wrap"></div>
+            <div class="panel-kv" id="panel-kv"></div>
+        </div>
+    </div>
+
+    <div id="gantt-tooltip"></div>
 
     </div><!-- /app-root -->
 
@@ -407,49 +267,27 @@
     /* ======================================================================
        LIVE CONNECTION -- same wire format, same localStorage key, as
        ranch_aab.html / WorkerApp.html: text/plain POST of {action, payload}
-       to the shared /exec URL. A URL saved on any of the three boards is
-       picked up by the others automatically.
+       to the shared /exec URL.
        ====================================================================== */
     const CONN_KEY = 'vpos_apps_script_url';
-    // Same shared deployment ranch_aab.html/WorkerApp.html default to --
-    // whichever board a manager signs into first, this is the URL they hit
-    // unless a different one has been saved to CONN_KEY.
     const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwUFXoHDFSUArQCIqkh2De8-fwPfWSG9LRvtagJPzmJdFaBx_95av5V57NzYs1J1IZLnA/exec';
     let APPS_SCRIPT_URL = localStorage.getItem(CONN_KEY) || DEFAULT_APPS_SCRIPT_URL;
     let LIVE_MODE = false;
-    let DATA = null; // { bed_master, crop_reference, planting_events, planting_rules, ... }
-    let WORKERS = []; // [{workerId, name, role}, ...] -- populated on connect, used by the dispatch worker-picker
 
-    /* Dispatching a planting event assigns real field work (see
-       dispatch-planting-event's header comment in DateEngine.gs), and
-       handleDispatchTask_ requires a workerId the same way every other
-       dispatch already does -- so PCB needs a worker list too. Best-effort:
-       a fetch failure here shouldn't block loading the planning queue
-       itself, it just leaves the picker empty until the manager retries. */
-    async function fetchWorkers_(url){
-        try {
-            const res = await callApi_(url, 'list-workers', {});
-            return (res && res.success && res.workers) || [];
-        } catch(err){
-            return [];
-        }
-    }
+    // Raw + derived cohort rows and current filter state.
+    let ALL_COHORTS = [];      // derived rows, see deriveCohortRow_
+    let FILTERED_COHORTS = [];
+    let SELECTED_CROPS = new Set(); // empty = all crops shown
+    let FACILITY_FILTER = 'ALL';
+    let BLOCK_FILTER = '';
+    let RANGE_START = null; // Date
+    let RANGE_END = null;   // Date
 
     const PCB_SESSION_KEY = 'vpos_pcb_session';
     let SESSION = null;
 
     const API_TIMEOUT_MS = 45000;
 
-    /* NOTE (2026-09-09 diagnostic pass): this used to collapse every
-       non-abort failure -- a real network error, a non-2xx HTTP status, AND
-       a JSON.parse failure on a response that DID arrive (e.g. Apps Script
-       returning its own HTML error/login-redirect page instead of JSON,
-       which happens when a request errors out or exceeds execution limits)
-       -- into one generic "Could not reach that URL" message. That message
-       is only accurate for the first case. The other two mean the request
-       DID reach the server; something on the server side failed or the
-       response wasn't parseable. Splitting these out so the real cause
-       shows up in the UI instead of always blaming connectivity. */
     function callApi_(url, action, payload){
         return new Promise((resolve, reject) => {
             if(!url){ reject(new Error('No Apps Script URL configured')); return; }
@@ -472,10 +310,6 @@
                 let data;
                 try { data = JSON.parse(bodyText); }
                 catch(parseErr){
-                    // Got a response, but it wasn't JSON -- usually Apps
-                    // Script's own error page (execution error, exceeded
-                    // quota, or an auth/login redirect), not a network
-                    // failure. Surface a snippet so it's actionable.
                     throw new Error('Server returned a non-JSON response (likely an Apps Script execution error or an auth redirect): ' + bodyText.slice(0, 200));
                 }
                 resolve(data);
@@ -484,8 +318,6 @@
                 if(err && err.name === 'AbortError'){
                     reject(new Error('Timed out reaching the Apps Script Web App'));
                 } else if(err instanceof TypeError){
-                    // fetch() itself only throws TypeError for genuine
-                    // network-level failures (DNS, CORS, offline, etc.)
                     reject(new Error('Could not reach that URL'));
                 } else {
                     reject(err);
@@ -541,7 +373,7 @@
         const loggedOutId = SESSION && SESSION.workerId;
         clearSession_();
         if(loggedOutId){ callApi_(APPS_SCRIPT_URL, 'logout', { workerId: loggedOutId }).catch(function(){}); }
-        DATA = null; LIVE_MODE = false;
+        ALL_COHORTS = []; FILTERED_COHORTS = []; LIVE_MODE = false;
         document.getElementById('login-worker-id').value = '';
         document.getElementById('login-pin').value = '';
         document.getElementById('login-error').textContent = '';
@@ -555,30 +387,112 @@
         lbl.textContent = label;
     }
 
-    /* ------------------------ MAIN DATA LOAD ------------------------
-       Pulls everything this board needs in one round trip via
-       'get-planting-events' -- the action that's actually wired into
-       routeAction_ (Code_main.gs -> DateEngine.gs). It returns
-       bed_master + crop_reference + planting_rules alongside
-       planting_events in the same response, so PCB doesn't need to
-       duplicate get-manager-today-view's much heavier ~20-tab assembly
-       just to get a bed list. (Previously called a 'list-planting-events'
-       action that was never wired into any deployment -- see DateEngine.gs
-       for the real, working implementation.) */
+    /* ======================================================================
+       DATA LOAD + FIELD MAPPING CONTRACT (locked in 2026-09-10)
+
+       Calls action 'get-cohort-board'. NOTE: this action name is NOT
+       confirmed to exist yet in Code_main.gs's routeAction_ -- no backend
+       file was supplied alongside this rewrite, so it could not be verified
+       against live code the way the field mapping below was. If it isn't
+       wired yet, add a handler that returns:
+         { success:true, data:{ cohorts:[...COHORT_MASTER rows...],
+                                 field_block_occupancy:[...FIELD_BLOCK_OCCUPANCY rows...] } }
+       This function tolerates a few reasonable response shapes, but the
+       column names below must match COHORT_MASTER / FIELD_BLOCK_OCCUPANCY
+       exactly as they exist in the live workbook.
+
+       Per-cohort field mapping (agreed with ranch owner 2026-09-10):
+         Bar start        : Planting_Date -> fallback Actual_Planting_Date
+         Bar end           : Actual_Harvest_Date -> Target_Harvest_Date -> Expected_Harvest_Date
+         Harvest window in : Target_Harvest_Date -> Expected_Harvest_Date
+         Harvest window out: Actual_Harvest_Date -> FIELD_BLOCK_OCCUPANCY.Harvest_End_Date
+         Block / bed range : COHORT_MASTER.Block_ID / Bed_Range, refined by
+                              FIELD_BLOCK_OCCUPANCY on Cohort_ID if present
+         Facility          : derived from Block_ID prefix, not a stored column
+                              (B1-B4, Z5 = FIELD; GH1-GH4, HT1-HT6 = GH)
+         Status badge      : derived from Current_State (7-stage sequence),
+                              not a separate Status enum
+       ====================================================================== */
+    async function loadCohortBoard_(url){
+        const res = await callApi_(url, 'get-cohort-board', {});
+        if(!res || !res.success) throw new Error((res && res.error) || 'Server returned an error');
+        const data = res.data || res;
+        const cohorts = data.cohorts || data.cohort_master || [];
+        const occupancy = data.field_block_occupancy || data.occupancy || [];
+        const occByCohort = {};
+        occupancy.forEach(o => { if(o && o.Cohort_ID) occByCohort[o.Cohort_ID] = o; });
+        return cohorts.map(c => deriveCohortRow_(c, occByCohort[c.Cohort_ID] || {}));
+    }
+
+    function parseDate_(v){
+        if(!v) return null;
+        if(v instanceof Date) return isNaN(v) ? null : v;
+        const d = new Date(v);
+        return isNaN(d) ? null : d;
+    }
+    function fmtDate_(v){
+        const d = parseDate_(v);
+        if(!d) return '—';
+        return d.toLocaleDateString('en-US', { year:'numeric', month:'short', day:'numeric' });
+    }
+
+    function facilityForBlock_(blockId){
+        if(!blockId) return null;
+        const id = String(blockId).toUpperCase();
+        if(/^(B[1-4]|Z5)$/.test(id)) return 'FIELD';
+        if(/^(GH[1-4]|HT[1-6])$/.test(id)) return 'GH';
+        return null;
+    }
+    const FACILITY_ICON = { FIELD: '🌱', GH: '🏠' };
+
+    const STATE_BADGE_MAP = {
+        Prep: 'PLANNED', Planted: 'PLANNED',
+        Growing: 'ACTIVE',
+        Harvestable: 'HARVESTING',
+        Harvested: 'COMPLETE', Cleanup: 'COMPLETE', Rest: 'COMPLETE'
+    };
+    function badgeForState_(state){ return STATE_BADGE_MAP[state] || 'PLANNED'; }
+
+    const CROP_COLOR_PALETTE = ['#4fc3f7','#81c784','#ffb74d','#ba68c8','#f06292','#a1887f','#90a4ae','#dce775','#4db6ac','#ff8a65','#7986cb','#aed581'];
+    function colorForCrop_(cropId){
+        if(!cropId) return '#607d8b';
+        let hash = 0;
+        for(let i=0;i<cropId.length;i++){ hash = (hash*31 + cropId.charCodeAt(i)) >>> 0; }
+        return CROP_COLOR_PALETTE[hash % CROP_COLOR_PALETTE.length];
+    }
+
+    function deriveCohortRow_(c, occ){
+        const blockId = c.Block_ID || occ.Block_ID || null;
+        const bedRange = c.Bed_Range || occ.Bed_Range || null;
+        const startDate = parseDate_(c.Planting_Date) || parseDate_(c.Actual_Planting_Date);
+        const endDate = parseDate_(c.Actual_Harvest_Date) || parseDate_(c.Target_Harvest_Date) || parseDate_(c.Expected_Harvest_Date);
+        const hwStart = parseDate_(c.Target_Harvest_Date) || parseDate_(c.Expected_Harvest_Date);
+        const hwEnd = parseDate_(c.Actual_Harvest_Date) || parseDate_(occ.Harvest_End_Date);
+        return {
+            cohortId: c.Cohort_ID,
+            cropId: c.Crop_ID,
+            variety: c.Variety || null,
+            blockId, bedRange,
+            startDate, endDate, hwStart, hwEnd,
+            facility: facilityForBlock_(blockId),
+            state: c.Current_State || null,
+            badge: badgeForState_(c.Current_State),
+            color: colorForCrop_(c.Crop_ID)
+        };
+    }
+
     async function connectLive(url, {silent} = {}){
         if(!silent){ document.getElementById('conn-status').textContent = 'Connecting…'; }
         try {
-            const res = await callApi_(url, 'get-planting-events', { status: 'PLANNED' });
-            if(!res.success) throw new Error(res.error || 'Server returned an error');
-            DATA = res.data || res; // tolerate either {success,data:{...}} or a flat {success,...} shape
-            WORKERS = await fetchWorkers_(url);
+            ALL_COHORTS = await loadCohortBoard_(url);
             LIVE_MODE = true;
             APPS_SCRIPT_URL = url;
             localStorage.setItem(CONN_KEY, url);
             setConnUI('live', 'Live · synced ' + new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}));
             document.getElementById('conn-status').textContent = 'Connected.';
             renderQueueWarning_();
-            renderAll_();
+            populateFilterControls_();
+            applyFiltersAndRender_();
             return true;
         } catch(err){
             setConnUI('error', 'Connection failed');
@@ -590,11 +504,10 @@
 
     function renderQueueWarning_(errMsg){
         const el = document.getElementById('queue-warning');
-        if(!LIVE_MODE || !DATA){
-            el.innerHTML = 'Not connected. Planned events, the spatial grid, and the batch generator all need a live Apps Script connection.' +
-                (errMsg ? ' Last error: <code>' + String(errMsg).replace(/</g,'&lt;') + '</code>' : '') +
-                ' If the error mentions an unknown action, this deployment hasn\'t picked up <code>PlanningEngine.gs</code> yet -- ' +
-                'push it and deploy a <strong>new version</strong> of the existing deployment (editing the file alone doesn\'t update the live /exec URL).';
+        if(!LIVE_MODE || !ALL_COHORTS.length){
+            el.innerHTML = 'Not connected (or no cohorts returned). This board calls the <code>get-cohort-board</code> action -- ' +
+                'confirm that action is wired in Code_main.gs\'s routeAction_ and returns COHORT_MASTER (+ FIELD_BLOCK_OCCUPANCY) rows.' +
+                (errMsg ? ' Last error: <code>' + String(errMsg).replace(/</g,'&lt;') + '</code>' : '');
             el.classList.add('show');
         } else {
             el.classList.remove('show');
@@ -611,704 +524,221 @@
         if(!ok){ alert('Refresh failed -- see the connection status bar for details.'); }
     }
 
-    function renderAll_(){
-        renderPipelineWidget_();
-        renderBlockMapView_();
-        renderEventsView_();
-        renderTimelineView_();
-        renderGridView_();
-        populateBatchCropSelect_();
-    }
+    /* ---------------------------- FILTERS ---------------------------- */
+    function populateFilterControls_(){
+        // Crop chips -- built from whatever crops are actually present in
+        // the loaded cohorts (not a separate CROP_REFERENCE load).
+        const crops = {};
+        ALL_COHORTS.forEach(c => { if(c.cropId) crops[c.cropId] = c.color; });
+        const cropIds = Object.keys(crops).sort();
+        const chipGrid = document.getElementById('crop-chip-grid');
+        chipGrid.innerHTML = cropIds.length
+            ? cropIds.map(id => `<button class="crop-chip${SELECTED_CROPS.has(id)?' selected':''}" data-crop="${id}"><span class="sw" style="background:${crops[id]};"></span>${id}</button>`).join('')
+            : '<span class="sub-line">No cohorts loaded yet.</span>';
 
-    /* ======================================================================
-       BED ALLOCATION (2026-09-09 pass, superseded 2026-09-09 later same
-       day) -- this tab used to run its own client-side copy of
-       facilityForBed_/resolveCropHomeBedBlock_/candidateBedsForEvent_/
-       bedsPerWaveForEvent_, then a per-card "Preview Bed Allocation"
-       button calling 'preview-planting-allocation' (BedAllocationEngine.gs)
-       and rendering a manual multi-select bed-chip grid right on the
-       card -- a manager still had to look at "Assign Beds (Rest,
-       OPEN_FIELD)" and pick individual beds, with no sense of which
-       block/cohort lane they were actually choosing into.
-       THIS IS THE BUG THE SOP FLAGGED: "the manager must guess which
-       beds belong to which crop / which cohort lane / which tunnel or
-       greenhouse is correct." Per that SOP, Planned Events is now a pure
-       TEMPORAL view (crop, wave, date, facility, status) with zero bed
-       logic -- no candidate fetch, no chip grid, no cap-enforcement
-       here. "Preview & Dispatch" instead opens the Crop Planting Profile
-       modal (BlockIntelligenceEngine.gs / openCropProfile_ below) on this
-       event's crop, scrolled straight to this exact wave/event row, where
-       the SAME 'preview-planting-allocation' -> 'auto-dispatch-planting-
-       event' chain already lives (see previewAndShowDispatch_ /
-       doDispatchFromProfile_) -- Block Map is the spatial source of
-       truth, Planned Events is the temporal one, per the SOP's own
-       framing. Nothing about the dispatch chain itself changed; only
-       WHERE a manager triggers it from.
-       ====================================================================== */
+        // Block select
+        const blocks = Array.from(new Set(ALL_COHORTS.map(c => c.blockId).filter(Boolean))).sort();
+        const blockSel = document.getElementById('block-filter');
+        const prevBlock = BLOCK_FILTER;
+        blockSel.innerHTML = '<option value="">All blocks</option>' + blocks.map(b => `<option value="${b}">${b}</option>`).join('');
+        blockSel.value = blocks.includes(prevBlock) ? prevBlock : '';
+        BLOCK_FILTER = blockSel.value;
 
-    function cropName_(cropId){
-        const ref = (DATA && DATA.crop_reference) || [];
-        const hit = ref.find(c => c.Crop_ID === cropId);
-        return (hit && hit.Crop_Name) || cropId;
-    }
-    function waveNameForRule_(ruleId){
-        const rules = (DATA && DATA.planting_rules) || [];
-        const hit = rules.find(r => r.Rule_ID === ruleId);
-        return hit ? hit.Wave_Name : '—';
-    }
-    function fmtDate_(d){
-        if(!d) return '—';
-        const dt = new Date(d);
-        return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
-    }
-    function todayIsoDate_(){
-        const d = new Date();
-        const pad = n => String(n).padStart(2, '0');
-        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-    }
-
-    /* ======================================================================
-       VIEW 1 -- Planned Events card queue + bed assignment + dispatch
-       ====================================================================== */
-    function renderPipelineWidget_(){
-        const wrap = document.getElementById('pipeline-chips');
-        if(!DATA){ wrap.innerHTML = '<span class="pipeline-chip"><span class="dot" style="background:var(--text-muted);"></span>Not connected</span>'; return; }
-        const events = (DATA.planting_events || []);
-        const now = new Date(); now.setHours(0,0,0,0);
-        const horizon = new Date(now.getTime() + 14*24*60*60*1000);
-        const upcoming = events.filter(e => e.Status === 'PLANNED' && e.Planned_Date && new Date(e.Planned_Date) >= now && new Date(e.Planned_Date) <= horizon);
-        if(!upcoming.length){ wrap.innerHTML = '<span class="pipeline-chip"><span class="dot" style="background:var(--status-green);"></span>Nothing planned in the next 14 days</span>'; return; }
-        const byActivity = {};
-        upcoming.forEach(e => { byActivity[e.Activity] = (byActivity[e.Activity] || 0) + 1; });
-        const colors = { Seeding:'var(--status-blue)', Transplanting:'var(--status-green)', Harvest:'var(--status-purple)' };
-        wrap.innerHTML = Object.keys(byActivity).map(act =>
-            `<span class="pipeline-chip"><span class="dot" style="background:${colors[act] || 'var(--status-amber)'};"></span><b>${byActivity[act]}</b>&nbsp;${act}</span>`
-        ).join('') + `<span class="pipeline-chip" style="opacity:.7;">Prep beds now for what's coming due</span>`;
-    }
-
-    function renderEventsView_(){
-        const grid = document.getElementById('events-grid');
-        if(!DATA){ grid.innerHTML = '<div class="empty-note">Connect to the Apps Script backend to load PLANTING_EVENTS.</div>'; return; }
-        const events = (DATA.planting_events || []).filter(e => e.Status === 'PLANNED')
-            .sort((a,b) => new Date(a.Planned_Date) - new Date(b.Planned_Date));
-        if(!events.length){ grid.innerHTML = '<div class="empty-note">No PLANNED events waiting -- everything in the queue has already been dispatched.</div>'; return; }
-        grid.innerHTML = events.map(e => eventCardHtml_(e)).join('');
-        events.forEach(e => wireEventCard_(e));
-    }
-
-    // Pure temporal card, per the SOP: crop, wave, date, facility, status.
-    // No bed chips, no worker picker, no cap math -- all of that now lives
-    // exactly once, inside the Crop Planting Profile modal (see
-    // waveEventRowHtml_ / previewAndShowDispatch_ / doDispatchFromProfile_
-    // below), which is also where Block Map lanes send a manager for the
-    // same crop. One dispatch surface, reached two ways, instead of two
-    // surfaces that could each decide beds differently.
-    function eventCardHtml_(e){
-        return `
-        <div class="event-card" id="event-card-${e.Event_ID}">
-            <div class="event-card-top">
-                <div class="event-crop">${cropName_(e.Crop_ID)} <span class="code">${e.Crop_ID}</span></div>
-                <span class="event-status ${e.Status}">${e.Status}</span>
-            </div>
-            <span class="event-wave">${waveNameForRule_(e.Rule_ID)}</span>
-            <div class="event-row"><span class="k">Activity</span><span>${e.Activity}</span></div>
-            <div class="event-row"><span class="k">Planned Date</span><span>${fmtDate_(e.Planned_Date)}</span></div>
-            <div class="event-row"><span class="k">Target Facility</span><span>${e.Target_Facility}</span></div>
-            <div class="event-card-actions">
-                <button class="btn btn-primary" id="dispatch-btn-${e.Event_ID}">Preview &amp; Dispatch</button>
-                <span class="sub" style="font-size:11px; color:var(--text-muted);">Opens this crop's Planting Profile, with beds pre-assigned</span>
-            </div>
-        </div>`;
-    }
-
-    // "Preview & Dispatch" on a Planned Events card no longer previews or
-    // dispatches anything itself -- it hands off to the Crop Planting
-    // Profile modal (openCropProfile_, below), landing straight on this
-    // exact event's row inside its wave, where the real preview-planting-
-    // allocation -> auto-dispatch-planting-event chain lives. See this
-    // section's own header comment for why.
-    function wireEventCard_(e){
-        const btn = document.getElementById('dispatch-btn-' + e.Event_ID);
-        if(!btn) return;
-        btn.addEventListener('click', () => openCropProfile_(e.Crop_ID, e.Event_ID));
-    }
-
-    /* ======================================================================
-       VIEW 2 -- Succession Timeline (lightweight Gantt-style strip per
-       Wave_Name/Rule, plotted against the season the rule actually spans,
-       with a tick for every generated PLANTING_EVENTS row)
-       ====================================================================== */
-    function renderTimelineView_(){
-        const body = document.getElementById('timeline-body');
-        if(!DATA){ body.innerHTML = '<div class="empty-note">Connect to load the succession schedule.</div>'; return; }
-        const rules = (DATA.planting_rules || []);
-        const events = (DATA.planting_events || []);
-        if(!rules.length){ body.innerHTML = '<div class="empty-note">No CROP_PLANTING_RULES loaded.</div>'; return; }
-
-        const allDates = [];
-        rules.forEach(r => { [r.Sow_Start, r.Sow_End, r.Transplant_Start, r.Transplant_End].forEach(d => { if(d) allDates.push(new Date(d)); }); });
-        events.forEach(e => { if(e.Planned_Date) allDates.push(new Date(e.Planned_Date)); });
-        if(!allDates.length){ body.innerHTML = '<div class="empty-note">No dated rules or events to plot.</div>'; return; }
-        const minD = new Date(Math.min(...allDates)), maxD = new Date(Math.max(...allDates));
-        const span = Math.max(1, maxD - minD);
-        const pct = d => ((new Date(d) - minD) / span) * 100;
-
-        // Month axis ticks
-        const ticks = [];
-        const cur = new Date(minD.getFullYear(), minD.getMonth(), 1);
-        while(cur <= maxD){ ticks.push(new Date(cur)); cur.setMonth(cur.getMonth() + 1); }
-        const axisHtml = `<div class="timeline-axis"><div></div><div class="timeline-axis-track">` +
-            ticks.map(t => `<span class="timeline-axis-tick" style="left:${pct(t)}%;">${t.toLocaleDateString('en-US',{month:'short'})}</span>`).join('') +
-            `</div></div>`;
-
-        const rowsHtml = rules.map(r => {
-            const start = r.Sow_Start || r.Transplant_Start;
-            const end = r.Transplant_End || r.Sow_End || start;
-            const barLeft = pct(start), barWidth = Math.max(1, pct(end) - pct(start));
-            const ruleEvents = events.filter(e => e.Rule_ID === r.Rule_ID);
-            const markers = ruleEvents.map(e => `<div class="timeline-marker ${e.Status}" style="left:${pct(e.Planned_Date)}%;" title="${e.Activity} — ${fmtDate_(e.Planned_Date)} (${e.Status})"></div>`).join('');
-            return `<div class="timeline-row">
-                <div class="timeline-label">${cropName_(r.Crop_ID)} <span class="tag">${r.Crop_ID}</span><span class="wave">${r.Wave_Name} · ${r.Target_Facility}</span></div>
-                <div class="timeline-track"><div class="timeline-bar" style="left:${barLeft}%; width:${barWidth}%;"></div>${markers}</div>
-            </div>`;
-        }).join('');
-
-        body.innerHTML = axisHtml + rowsHtml +
-            `<div class="sub" style="margin-top:12px; font-size:11px; color:var(--text-muted);">Blue bar = rule's sow/transplant window · green tick = PLANNED event · gray tick = DISPATCHED event.</div>`;
-    }
-
-    /* ======================================================================
-       VIEW 3 -- Spatial Grid (mirrors ranch_aab.html's 323-unit layout,
-       colored by BED_MASTER.Current_State rather than daily urgency, so a
-       planner can see occupied/resting/reserved at a glance before
-       assigning a wave)
-       ====================================================================== */
-    const blockConfigs = [
-        { prefix: 'B1', startX: 20 },
-        { prefix: 'B2', startX: 200 },
-        { prefix: 'B3', startX: 380 },
-        { prefix: 'B4', startX: 560 }
-    ];
-    function stateColorClass_(state){
-        switch(state){
-            case 'Rest': return 'var(--status-gray)';
-            case 'Prep': return 'var(--status-blue)';
-            case 'Growing': case 'Planted': return 'var(--status-green)';
-            case 'Harvestable': return 'var(--status-purple)';
-            case 'Cleanup': return 'var(--status-amber)';
-            default: return 'var(--status-gray)';
+        // Default visible date range: min start / max end across cohorts,
+        // padded a little, falling back to today ±90 days if no dates exist.
+        if(!RANGE_START || !RANGE_END){
+            const starts = ALL_COHORTS.map(c => c.startDate).filter(Boolean);
+            const ends = ALL_COHORTS.map(c => c.endDate).filter(Boolean);
+            const today = new Date();
+            let minD = starts.length ? new Date(Math.min(...starts)) : new Date(today.getTime() - 30*86400000);
+            let maxD = ends.length ? new Date(Math.max(...ends)) : new Date(today.getTime() + 180*86400000);
+            minD = new Date(minD.getTime() - 7*86400000);
+            maxD = new Date(maxD.getTime() + 7*86400000);
+            RANGE_START = minD; RANGE_END = maxD;
+            document.getElementById('range-start-input').value = RANGE_START.toISOString().slice(0,10);
+            document.getElementById('range-end-input').value = RANGE_END.toISOString().slice(0,10);
         }
     }
-    function renderGridView_(){
-        const layer = document.getElementById('pcb-beds-layer');
-        const labels = document.getElementById('pcb-block-labels');
-        layer.innerHTML = ''; labels.innerHTML = '';
-        if(!DATA){ return; }
-        const bedIndex = {};
-        (DATA.bed_master || []).forEach(b => { bedIndex[b.Bed_ID] = b; });
 
-        blockConfigs.forEach(block => {
-            labels.innerHTML += `<text class="block-label" x="${block.startX}" y="14">${block.prefix}</text>`;
-            for (let i = 1; i <= 55; i++) {
-                const col = (i - 1) % 5;
-                const row = Math.floor((i - 1) / 5);
-                const x = block.startX + (col * 32);
-                const y = 30 + (row * 26);
-                const bedId = `${block.prefix}-${i.toString().padStart(2, '0')}`;
-                const bed = bedIndex[bedId];
-                const stroke = stateColorClass_(bed ? bed.Current_State : 'Rest');
-                layer.innerHTML += `<g transform="translate(${x},${y})" title="${bedId}"><rect class="bed-rect" width="28" height="20" stroke="${stroke}"></rect><text class="bed-text" x="14" y="13">${i}</text></g>`;
+    function applyFiltersAndRender_(){
+        FILTERED_COHORTS = ALL_COHORTS.filter(c => {
+            if(SELECTED_CROPS.size && !SELECTED_CROPS.has(c.cropId)) return false;
+            if(FACILITY_FILTER !== 'ALL' && c.facility !== FACILITY_FILTER) return false;
+            if(BLOCK_FILTER && c.blockId !== BLOCK_FILTER) return false;
+            if(RANGE_START && RANGE_END){
+                const s = c.startDate || c.endDate;
+                const e = c.endDate || c.startDate;
+                if(s && e && (e < RANGE_START || s > RANGE_END)) return false;
             }
+            return true;
         });
-        labels.innerHTML += `<text class="block-label" x="760" y="14">Z5</text>`;
-        for (let i = 1; i <= 11; i++) {
-            const col = (i - 1) % 2;
-            const row = Math.floor((i - 1) / 2);
-            const x = 760 + (col * 68);
-            const y = 30 + (row * 26);
-            const bedId = `Z5-${i.toString().padStart(2, '0')}`;
-            const bed = bedIndex[bedId];
-            const stroke = stateColorClass_(bed ? bed.Current_State : 'Rest');
-            layer.innerHTML += `<g transform="translate(${x},${y})" title="${bedId}"><rect class="bed-rect" width="60" height="20" stroke="${stroke}"></rect><text class="bed-text" x="30" y="13">${bedId}</text></g>`;
-        }
+        document.getElementById('filter-count').textContent = FILTERED_COHORTS.length + ' of ' + ALL_COHORTS.length + ' cohorts';
+        renderGantt_();
     }
 
-    /* ======================================================================
-       VIEW 0 -- Block Map (Block Intelligence Board)
-       Calls 'get-block-intelligence-board' (BlockIntelligenceEngine.gs) for
-       ONE block at a time -- separate round trip from the main
-       'get-planting-events' load, since lanes need a fresh BED_MASTER read
-       (occupancy can change the instant another manager dispatches) and
-       there's no reason to compute every block's lanes when only one is on
-       screen. Block pills switch CURRENT_BLOCK_ID and re-fetch.
-       ====================================================================== */
-    let CURRENT_BLOCK_ID = 'B1';
-    const PROFILE_BLOCK_IDS_ = ['B1', 'B2', 'B3', 'B4', 'Z5'];
-
-    // BLOCK_FAMILY_NAMES_ (defined further down, in the Batch Generator
-    // section) is keyed by CROP_REFERENCE.Default_Block_ID values
-    // ('BLK-01'..'BLK-04', 'Z5'), not by BED_MASTER.Block_ID values
-    // ('B1'..'B4', 'Z5') -- this converts the latter to the former so both
-    // the block pills and the block header can share one display-name map.
-    function blockDisplayName_(bedBlockId){
-        const key = (bedBlockId === 'Z5') ? 'Z5' : ('BLK-0' + String(bedBlockId).replace(/^B/, ''));
-        return (typeof BLOCK_FAMILY_NAMES_ !== 'undefined' && BLOCK_FAMILY_NAMES_[key]) || bedBlockId;
-    }
-
-    function laneStateColor_(state){
-        switch(state){
-            case 'Rest': return 'var(--status-gray)';
-            case 'Prep': return 'var(--status-blue)';
-            case 'Growing': case 'Planted': return 'var(--status-green)';
-            case 'Harvestable': return 'var(--status-purple)';
-            case 'Harvested': return 'var(--status-amber)';
-            case 'Cleanup': return 'var(--status-amber)';
-            default: return 'var(--status-gray)';
-        }
-    }
-
-    function renderBlockPills_(){
-        const row = document.getElementById('block-pill-row');
-        row.innerHTML = PROFILE_BLOCK_IDS_.map(bid =>
-            `<button type="button" class="block-pill${bid === CURRENT_BLOCK_ID ? ' active' : ''}" data-block="${bid}">${blockDisplayName_(bid)}</button>`
-        ).join('');
-        row.querySelectorAll('.block-pill').forEach(btn => {
-            btn.addEventListener('click', () => {
-                CURRENT_BLOCK_ID = btn.dataset.block;
-                renderBlockMapView_();
-            });
-        });
-    }
-
-    async function renderBlockMapView_(){
-        renderBlockPills_();
-        const body = document.getElementById('block-map-body');
-        if(!LIVE_MODE){ body.innerHTML = '<div class="empty-note">Connect to the Apps Script backend to load the Block Map.</div>'; return; }
-        body.innerHTML = '<div class="empty-note">Loading block…</div>';
-        try {
-            const res = await callApi_(APPS_SCRIPT_URL, 'get-block-intelligence-board', { blockId: CURRENT_BLOCK_ID });
-            if(!res.success) throw new Error(res.error || 'Server returned an error');
-            renderBlockMapBody_(res.blocks[0]);
-        } catch(err){
-            body.innerHTML = `<div class="empty-note">Could not load the Block Map: ${err.message}</div>`;
-        }
-    }
-
-    function renderBlockMapBody_(block){
-        const body = document.getElementById('block-map-body');
-        if(!block){ body.innerHTML = '<div class="empty-note">No data for this block.</div>'; return; }
-        const z = block.zoning;
-        const headerHtml = `
-            <div class="block-header">
-                <h2>📍 ${blockDisplayName_(block.blockId)}</h2>
-                <div class="sub">Facility: ${block.facility || '—'}${z && z.operationalRule ? ' · ' + z.operationalRule : ''}</div>
-                <div class="block-meta-row">
-                    <span>Total Beds: <b>${block.totalBeds}</b></span>
-                    ${z && z.cohortStructure ? `<span>Structure: <b>${z.cohortStructure}</b></span>` : ''}
-                    ${z && z.bedsPerCohort ? `<span>Beds/Cohort: <b>${z.bedsPerCohort}</b></span>` : ''}
-                    <span>Active Lanes: <b>${block.lanes.filter(l => l.cropId).length}</b></span>
-                </div>
-            </div>`;
-
-        const laneRows = block.lanes.map(lane => {
-            const isCrop = !!lane.cropId;
-            const range = lane.startBed === lane.endBed ? lane.startBed : `${lane.startBed} \u2192 ${lane.endBed}`;
-            const label = isCrop ? (lane.cropName || lane.cropId) : (lane.state === 'Rest' ? 'Rest / Available' : lane.state);
-            const codeTag = isCrop ? `<span class="code">${lane.cropId}</span>` : '';
-            return `
-            <div class="lane-row${isCrop ? ' clickable' : ''}" ${isCrop ? `data-crop="${lane.cropId}"` : ''}>
-                <div class="lane-swatch" style="background:${laneStateColor_(lane.state)};"></div>
-                <div class="lane-body">
-                    <div class="lane-crop">${label}${codeTag}</div>
-                    <div class="lane-beds">${range} &middot; ${lane.bedCount} bed${lane.bedCount === 1 ? '' : 's'}${lane.cohortId ? ' &middot; ' + lane.cohortId : ''}</div>
-                </div>
-                <span class="lane-state-tag" style="background:rgba(255,255,255,0.08); color:var(--text-main);">${lane.state}</span>
-            </div>`;
-        }).join('');
-
-        const inactiveHtml = (block.inactiveCrops && block.inactiveCrops.length) ? `
-            <div class="inactive-crops-wrap">
-                <div class="field-label">Zoned for this block, not currently planted</div>
-                <div class="chip-grid">
-                    ${block.inactiveCrops.map(c => `<button type="button" class="chip" data-crop="${c.cropId}">${c.cropName}</button>`).join('')}
-                </div>
-            </div>` : '';
-
-        body.innerHTML = headerHtml + `<div class="lane-list">${laneRows || '<div class="empty-note">No beds found for this block.</div>'}</div>` + inactiveHtml;
-
-        body.querySelectorAll('[data-crop]').forEach(el => {
-            el.addEventListener('click', () => openCropProfile_(el.dataset.crop));
-        });
-    }
-
-    /* ======================================================================
-       Crop Planting Profile modal -- calls 'get-crop-planting-profile'
-       (BlockIntelligenceEngine.gs). Dispatch from inside the modal reuses
-       the EXISTING 'preview-planting-allocation' / 'auto-dispatch-planting-
-       event' actions (BedAllocationEngine.gs) unchanged -- same
-       createCohort_ -> handleDispatchTask_ -> Verify & Lock DOB chain the
-       Planned Events tab already uses. This modal only changes how a
-       manager GETS to that dispatch call, not what it does.
-       ====================================================================== */
-    function fmtDayRange_(startDay, endDay){
-        if(startDay == null) return '—';
-        return (startDay === endDay) ? ('Day ' + startDay) : ('Day ' + startDay + '–' + endDay);
-    }
-
-    // focusEventId (optional) -- set when opened from a Planned Events
-    // card ("Preview & Dispatch" there just calls this): once the profile
-    // loads, scroll straight to that event's row inside its wave and open
-    // its own inline preview, so the manager lands on exactly the
-    // dispatch they asked for instead of having to re-find it among every
-    // wave/event this crop has.
-    async function openCropProfile_(cropId, focusEventId){
-        const overlay = document.getElementById('profile-overlay');
-        const titleEl = document.getElementById('profile-title');
-        const subEl = document.getElementById('profile-sub');
-        const bodyEl = document.getElementById('profile-body');
-        titleEl.textContent = cropName_(cropId);
-        subEl.textContent = cropId;
-        bodyEl.innerHTML = '<div class="empty-note">Loading planting profile…</div>';
-        overlay.classList.add('open');
-        if(!LIVE_MODE){ bodyEl.innerHTML = '<div class="empty-note">Connect to the Apps Script backend to load this profile.</div>'; return; }
-        try {
-            const res = await callApi_(APPS_SCRIPT_URL, 'get-crop-planting-profile', { cropId });
-            if(!res.success) throw new Error(res.error || 'Server returned an error');
-            renderCropProfileBody_(res);
-            if(focusEventId) focusWaveEvent_(focusEventId);
-        } catch(err){
-            bodyEl.innerHTML = `<div class="empty-note">Could not load profile: ${err.message}</div>`;
-        }
-    }
-
-    // Scrolls to and highlights one wave-event row inside the just-rendered
-    // profile, then auto-opens its inline dispatch preview (equivalent to
-    // clicking its own "Preview & Dispatch" button) so a manager who
-    // arrived here from the Planned Events tab doesn't have to click twice.
-    // No-op (quietly) if the event isn't PLANNED anymore or isn't in this
-    // crop's wave schedule -- the profile itself is still fully usable.
-    function focusWaveEvent_(eventId){
-        const row = document.getElementById('wave-event-' + eventId);
-        if(!row) return;
-        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        const card = row.closest('.wave-card');
-        if(card){
-            card.classList.add('focus-highlight');
-            setTimeout(() => card.classList.remove('focus-highlight'), 3000);
-        }
-        const previewBtn = row.querySelector('[data-preview-event]');
-        if(previewBtn) previewBtn.click();
-    }
-
-    function closeCropProfile_(){
-        document.getElementById('profile-overlay').classList.remove('open');
-    }
-
-    function renderCropProfileBody_(profile){
-        const c = profile.crop, lc = profile.lifecycle, z = profile.zoning;
-        document.getElementById('profile-title').innerHTML = `${c.cropName}<span class="code">${c.cropId}</span>`;
-        document.getElementById('profile-sub').textContent =
-            `Home Block ${c.homeBedBlock || '—'}${z && z.operationalRule ? ' · ' + z.operationalRule : ''}`;
-
-        const overviewHtml = `
-            <div class="profile-section">
-                <div class="profile-section-title">Overview</div>
-                <div class="profile-kv-grid">
-                    <div><span class="k">Nursery Track</span></div><div>${c.nurseryTrack || '—'}</div>
-                    <div><span class="k">Cycle Days</span></div><div>${c.cycleDaysMin || '?'}–${c.cycleDaysMax || '?'} days</div>
-                    <div><span class="k">Harvest Window Type</span></div><div>${(lc && lc.harvestWindowType) || '—'}</div>
-                    <div><span class="k">Days To First Harvest</span></div><div>${(lc && lc.daysToFirstHarvest) || '—'}</div>
-                    <div><span class="k">Germination Days</span></div><div>${(lc && lc.germinationDays) || '—'}</div>
-                    <div><span class="k">Propagation Method</span></div><div>${(lc && lc.propagationMethod) || '—'}</div>
-                </div>
-                ${lc && lc.harvestNotes ? `<div class="profile-note">${lc.harvestNotes}</div>` : ''}
-                ${c.notes ? `<div class="profile-note">${c.notes}</div>` : ''}
-            </div>`;
-
-        const stageHtml = profile.stageTemplate.length ? `
-            <div class="profile-section">
-                <div class="profile-section-title">Stage Timeline</div>
-                ${profile.stageTemplate.map(s => `
-                    <div class="stage-row">
-                        <span>${s.stageName}</span>
-                        <span>${fmtDayRange_(s.startDay, s.endDay)}</span>
-                        <span style="color:var(--text-muted);">${s.stageType}${s.harvestCadenceDays ? ' · every ' + s.harvestCadenceDays + 'd' : ''}</span>
-                    </div>`).join('')}
-            </div>` : '';
-
-        const cohortsHtml = profile.cohorts.length ? `
-            <div class="profile-section">
-                <div class="profile-section-title">Live &amp; Recent Cohorts</div>
-                ${profile.cohorts.map(co => `
-                    <div class="cohort-row">
-                        <span>${co.cohortId}<br><span style="color:var(--text-muted); font-size:10.5px;">${co.assignedBeds.length ? co.assignedBeds.join(', ') : 'no beds assigned'}</span></span>
-                        <span>${co.currentState}</span>
-                        <span style="color:var(--text-muted);">Planted ${fmtDate_(co.actualPlantingDate || co.plantingDate)}${co.expectedHarvestDate ? ' · harvest ~' + fmtDate_(co.expectedHarvestDate) : ''}</span>
-                    </div>`).join('')}
-            </div>` : `<div class="profile-section"><div class="profile-section-title">Live &amp; Recent Cohorts</div><div class="sub" style="font-size:11.5px; color:var(--text-muted);">No cohorts recorded for this crop yet.</div></div>`;
-
-        const wavesHtml = `
-            <div class="profile-section">
-                <div class="profile-section-title">Wave Schedule</div>
-                ${profile.waves.length ? profile.waves.map(w => waveCardHtml_(w, c.cropId)).join('') : '<div class="sub" style="font-size:11.5px; color:var(--text-muted);">No CROP_PLANTING_RULES defined for this crop yet.</div>'}
-            </div>`;
-
-        document.getElementById('profile-body').innerHTML = overviewHtml + stageHtml + cohortsHtml + wavesHtml;
-        wireProfileDispatchButtons_(profile.crop.cropId);
-    }
-
-    function waveCardHtml_(w, cropId){
-        const window = w.transplantStart ? `Transplant ${fmtDate_(w.transplantStart)} \u2192 ${fmtDate_(w.transplantEnd)}` : `Sow ${fmtDate_(w.sowStart)} \u2192 ${fmtDate_(w.sowEnd)}`;
-        const cap = w.bedsPerWave ? `${w.bedsPerWave} beds/wave` : 'uncapped';
-        const eventsHtml = w.events.length ? w.events.map(e => waveEventRowHtml_(e, w)).join('') :
-            `<div class="sub" style="font-size:11px; color:var(--text-muted); padding:6px 0;">No PLANNED/DISPATCHED events generated for this wave yet.</div>`;
-        return `
-            <div class="wave-card">
-                <div class="wave-card-top"><span>${w.waveName}</span><span style="color:var(--text-muted); font-weight:400;">${w.activity}</span></div>
-                <div class="wave-card-meta">${window} &middot; ${w.targetFacility} &middot; ${cap}${w.bedPreview && w.bedPreview.homeBlock ? ' &middot; Block ' + w.bedPreview.homeBlock : ''}</div>
-                ${eventsHtml}
-            </div>`;
-    }
-
-    function waveEventRowHtml_(e, w){
-        const dateStr = fmtDate_(e.plannedDate);
-        if(e.status !== 'PLANNED'){
-            return `<div class="wave-event-row" id="wave-event-${e.eventId}">
-                <span>${e.activity} — ${dateStr}</span>
-                <span class="wave-event-status ${e.status}">${e.status}</span>
-                <span style="color:var(--text-muted);">${e.assignedBeds || ''}${e.cohortId ? ' · ' + e.cohortId : ''}</span>
-            </div>`;
-        }
-        return `<div class="wave-event-row" id="wave-event-${e.eventId}">
-            <span>${e.activity} — ${dateStr}</span>
-            <span class="wave-event-status PLANNED">PLANNED</span>
-            <button type="button" class="btn" data-preview-event="${e.eventId}">Preview &amp; Dispatch</button>
-            <div class="dispatch-inline hidden" id="dispatch-panel-${e.eventId}"></div>
-        </div>`;
-    }
-
-    function wireProfileDispatchButtons_(cropId){
-        document.querySelectorAll('#profile-body [data-preview-event]').forEach(btn => {
-            btn.addEventListener('click', () => previewAndShowDispatch_(btn.dataset.previewEvent, cropId, btn));
-        });
-    }
-
-    async function previewAndShowDispatch_(eventId, cropId, triggerBtn){
-        const panel = document.getElementById('dispatch-panel-' + eventId);
-        if(!panel) return;
-        triggerBtn.disabled = true; triggerBtn.textContent = 'Loading…';
-        try {
-            const res = await callApi_(APPS_SCRIPT_URL, 'preview-planting-allocation', { eventId });
-            if(!res.success) throw new Error(res.error || 'Server returned an error');
-            const bedList = res.bedIds && res.bedIds.length
-                ? (res.bedIds.length > 1 ? `${res.bedIds[0]} \u2192 ${res.bedIds[res.bedIds.length - 1]}` : res.bedIds[0])
-                : null;
-            panel.classList.remove('hidden');
-            panel.innerHTML = `
-                <span class="dispatch-preview-note">${bedList ? 'Auto-assigned beds: <b>' + bedList + '</b> (' + res.bedIds.length + ')' : (res.note || 'No Rest beds currently available.')}</span>
-                <select id="worker-select-profile-${eventId}">
-                    <option value="">Choose a worker…</option>
-                    ${WORKERS.map(w => `<option value="${w.workerId}">${w.name || w.workerId}${w.role ? ' (' + w.role + ')' : ''}</option>`).join('')}
-                </select>
-                <button type="button" class="btn btn-primary" id="confirm-dispatch-${eventId}" ${bedList ? '' : 'disabled'}>Dispatch</button>
-                <div class="dispatch-error" id="dispatch-error-${eventId}"></div>`;
-            triggerBtn.remove();
-            document.getElementById('confirm-dispatch-' + eventId).addEventListener('click', () => {
-                const workerId = document.getElementById('worker-select-profile-' + eventId).value;
-                if(!workerId){ document.getElementById('dispatch-error-' + eventId).textContent = 'Choose a worker first.'; return; }
-                doDispatchFromProfile_(eventId, workerId, cropId);
-            });
-        } catch(err){
-            triggerBtn.disabled = false; triggerBtn.textContent = 'Preview & Dispatch';
-            alert('Could not preview allocation: ' + err.message);
-        }
-    }
-
-    async function doDispatchFromProfile_(eventId, workerId, cropId){
-        const managerId = SESSION && SESSION.workerId;
-        if(!managerId){ alert('Your session expired -- please sign in again.'); signOut_(); return; }
-        const btn = document.getElementById('confirm-dispatch-' + eventId);
-        const errEl = document.getElementById('dispatch-error-' + eventId);
-        errEl.textContent = '';
-        btn.disabled = true; btn.textContent = 'Dispatching…';
-        try {
-            const res = await callApi_(APPS_SCRIPT_URL, 'auto-dispatch-planting-event', { managerId, eventId, workerId });
-            if(!res.success) throw new Error(res.error || 'Server rejected the request.');
-            // Refresh the profile in place, plus the main data set (bed
-            // states just changed) and the Block Map lanes behind it --
-            // same "reconnect after a write" pattern dispatchEvent_ uses.
-            await connectLive(APPS_SCRIPT_URL, { silent: true });
-            openCropProfile_(cropId);
-        } catch(err){
-            errEl.textContent = 'Could not dispatch: ' + err.message;
-            btn.disabled = false; btn.textContent = 'Dispatch';
-        }
-    }
-
-    document.getElementById('profile-close-btn').addEventListener('click', closeCropProfile_);
-    document.getElementById('profile-overlay').addEventListener('click', (e) => { if(e.target.id === 'profile-overlay') closeCropProfile_(); });
-
-    /* ======================================================================
-       VIEW 4 -- Batch Generator: back-schedules from a DTM + target date,
-       expands a succession run of N waves at a fixed interval, previews it,
-       then either saves it via 'add-planting-events' (if that action
-       is deployed) or hands back a copyable JSON payload as a fallback.
-       ====================================================================== */
-
-    /* Block-family grouping for the crop select -- CROP_REFERENCE.Default_Block_ID
-       (BLK-01..04, Z5) is the SAME field createCohort_ (Database.gs) actually
-       uses, so grouping off it here can't drift out of sync with the real
-       block assignments the way a hand-typed crop->block list would. Family
-       display names match the existing SVG block labels in ranch_aab.html's
-       spatial grid (BLOCK 1: SOLANACEAE, etc.) for consistency across both
-       apps. NOT a fixed sub-zone map -- a block's 55 beds rotate through
-       however many crops share that block (see CROP_ZONING_REFERENCE's
-       Cohort_Structure column), this is just "which block does this crop
-       usually go in," same as Default_Block_ID already means. */
-    var BLOCK_FAMILY_NAMES_ = {
-        'BLK-01': 'Block 1 \u2014 Solanaceae & Peppers',
-        'BLK-02': 'Block 2 \u2014 Fast Greens',
-        'BLK-03': 'Block 3 \u2014 Brassicas & Vine',
-        'BLK-04': 'Block 4 \u2014 Roots, Staples & Cover Crops',
-        'Z5': 'Zone 5 \u2014 Perennial'
-    };
-    function populateBatchCropSelect_(){
-        const sel = document.getElementById('batch-crop-select');
-        const crops = (DATA && DATA.crop_reference) || [];
-        if(!crops.length){ sel.innerHTML = '<option value="">No crop reference loaded</option>'; return; }
-        const byBlock = {};
-        const order = [];
-        crops.forEach(c => {
-            const key = c.Default_Block_ID || 'Unassigned';
-            if(!byBlock[key]){ byBlock[key] = []; order.push(key); }
-            byBlock[key].push(c);
-        });
-        sel.innerHTML = order.map(key => `
-            <optgroup label="${BLOCK_FAMILY_NAMES_[key] || key}">
-                ${byBlock[key].map(c => `<option value="${c.Crop_ID}">${c.Crop_Name} (${c.Crop_ID})</option>`).join('')}
-            </optgroup>`).join('');
-        sel.onchange = () => {
-            const crop = crops.find(c => c.Crop_ID === sel.value);
-            if(crop && crop.Cycle_Days_Min){
-                document.getElementById('batch-dtm').value = crop.Cycle_Days_Min;
-            }
-            if(crop && crop.Nursery_Track === 'Transplants' && !document.getElementById('batch-nursery-days').value){
-                document.getElementById('batch-nursery-days').value = 21;
-            }
-        };
-        sel.dispatchEvent(new Event('change'));
-    }
-    document.getElementById('batch-anchor-select').addEventListener('change', (e) => {
-        document.getElementById('batch-anchor-date-label').textContent = e.target.value === 'harvest' ? 'Target Harvest Date' : 'Field Planting / Transplant Date';
+    document.getElementById('crop-chip-grid').addEventListener('click', (e) => {
+        const chip = e.target.closest('.crop-chip');
+        if(!chip) return;
+        const id = chip.dataset.crop;
+        if(SELECTED_CROPS.has(id)) SELECTED_CROPS.delete(id); else SELECTED_CROPS.add(id);
+        chip.classList.toggle('selected');
+        applyFiltersAndRender_();
+    });
+    document.getElementById('facility-filter').addEventListener('change', (e) => { FACILITY_FILTER = e.target.value; applyFiltersAndRender_(); });
+    document.getElementById('block-filter').addEventListener('change', (e) => { BLOCK_FILTER = e.target.value; applyFiltersAndRender_(); });
+    document.getElementById('range-start-input').addEventListener('change', (e) => { RANGE_START = e.target.value ? new Date(e.target.value + 'T00:00:00') : null; applyFiltersAndRender_(); });
+    document.getElementById('range-end-input').addEventListener('change', (e) => { RANGE_END = e.target.value ? new Date(e.target.value + 'T23:59:59') : null; applyFiltersAndRender_(); });
+    document.getElementById('filter-reset-btn').addEventListener('click', () => {
+        SELECTED_CROPS = new Set();
+        FACILITY_FILTER = 'ALL'; document.getElementById('facility-filter').value = 'ALL';
+        BLOCK_FILTER = ''; document.getElementById('block-filter').value = '';
+        RANGE_START = null; RANGE_END = null;
+        populateFilterControls_();
+        applyFiltersAndRender_();
     });
 
-    let BATCH_PLAN = [];
-    function generateBatchPlan_(){
-        const errEl = document.getElementById('batch-error');
-        errEl.textContent = '';
-        const cropId = document.getElementById('batch-crop-select').value;
-        const anchorMode = document.getElementById('batch-anchor-select').value;
-        const anchorDateStr = document.getElementById('batch-anchor-date').value;
-        const dtm = parseInt(document.getElementById('batch-dtm').value, 10);
-        const nurseryDays = parseInt(document.getElementById('batch-nursery-days').value, 10) || 0;
-        const facility = document.getElementById('batch-facility-select').value;
-        const intervalDays = parseInt(document.getElementById('batch-interval-days').value, 10) || 0;
-        const waveCount = Math.max(1, parseInt(document.getElementById('batch-wave-count').value, 10) || 1);
-        const waveName = document.getElementById('batch-wave-name').value.trim() || 'Untitled Wave';
-
-        if(!cropId){ errEl.textContent = 'Choose a crop.'; return null; }
-        if(!anchorDateStr){ errEl.textContent = 'Choose an anchor date.'; return null; }
-        if(!dtm || dtm < 1){ errEl.textContent = 'Days To Maturity must be a positive number.'; return null; }
-
-        const dayMs = 24 * 60 * 60 * 1000;
-        const plan = [];
-        for(let w = 0; w < waveCount; w++){
-            const anchor = new Date(anchorDateStr + 'T00:00:00');
-            anchor.setTime(anchor.getTime() + w * intervalDays * dayMs);
-            let harvestDate, fieldDate;
-            if(anchorMode === 'harvest'){
-                harvestDate = new Date(anchor);
-                fieldDate = new Date(anchor.getTime() - dtm * dayMs);
-            } else {
-                fieldDate = new Date(anchor);
-                harvestDate = new Date(anchor.getTime() + dtm * dayMs);
-            }
-            const nurseryDate = nurseryDays > 0 ? new Date(fieldDate.getTime() - nurseryDays * dayMs) : null;
-            plan.push({
-                wave: w + 1,
-                cropId, waveName, facility,
-                nurserySeedingDate: nurseryDate ? nurseryDate.toISOString().slice(0,10) : null,
-                fieldPlantingDate: fieldDate.toISOString().slice(0,10),
-                targetHarvestDate: harvestDate.toISOString().slice(0,10),
-                activity: nurseryDays > 0 ? 'Transplanting' : 'Seeding'
-            });
-        }
-        return plan;
+    /* ---------------------------- GANTT RENDER ---------------------------- */
+    function pctForDate_(d){
+        if(!RANGE_START || !RANGE_END) return 0;
+        const total = RANGE_END - RANGE_START;
+        if(total <= 0) return 0;
+        let pct = ((d - RANGE_START) / total) * 100;
+        return Math.max(0, Math.min(100, pct));
     }
 
-    document.getElementById('batch-preview-btn').addEventListener('click', () => {
-        const plan = generateBatchPlan_();
-        if(!plan) return;
-        BATCH_PLAN = plan;
-        const previewEl = document.getElementById('batch-preview');
-        previewEl.innerHTML = plan.map(p => `
-            <div class="preview-row">
-                <span>Wave ${p.wave} — ${p.activity}${p.nurserySeedingDate ? ' (nursery ' + fmtDate_(p.nurserySeedingDate) + ')' : ''}</span>
-                <span>${fmtDate_(p.fieldPlantingDate)} → harvest ${fmtDate_(p.targetHarvestDate)} <span class="tag">${p.facility}</span></span>
-            </div>`).join('');
-        document.getElementById('batch-save-btn').disabled = false;
-    });
+    function renderAxis_(){
+        const track = document.getElementById('gantt-axis-track');
+        track.innerHTML = '';
+        if(!RANGE_START || !RANGE_END) return;
+        // one tick per month boundary within the visible range
+        const cursor = new Date(RANGE_START.getFullYear(), RANGE_START.getMonth(), 1);
+        while(cursor <= RANGE_END){
+            if(cursor >= RANGE_START){
+                const left = pctForDate_(cursor);
+                const tick = document.createElement('div');
+                tick.className = 'gantt-axis-tick';
+                tick.style.left = left + '%';
+                tick.textContent = cursor.toLocaleDateString('en-US', { month:'short', year: cursor.getMonth()===0 ? 'numeric' : undefined });
+                track.appendChild(tick);
+            }
+            cursor.setMonth(cursor.getMonth()+1);
+        }
+        const today = new Date();
+        if(today >= RANGE_START && today <= RANGE_END){
+            const line = document.createElement('div');
+            line.className = 'gantt-today-line';
+            line.style.left = pctForDate_(today) + '%';
+            line.title = 'Today';
+            track.appendChild(line);
+        }
+    }
 
-    document.getElementById('batch-save-btn').addEventListener('click', async () => {
-        const managerId = SESSION && SESSION.workerId;
-        const errEl = document.getElementById('batch-error');
-        errEl.textContent = '';
-        if(!BATCH_PLAN.length) return;
-        const events = BATCH_PLAN.map(p => ({
-            Rule_ID: null, // server assigns/creates a rule if one doesn't already exist for this crop+wave
-            Crop_ID: p.cropId,
-            Activity: p.activity,
-            Planned_Date: p.fieldPlantingDate,
-            Target_Facility: p.facility,
-            Wave_Name: p.waveName,
-            Status: 'PLANNED'
-        }));
-        if(!LIVE_MODE || !APPS_SCRIPT_URL){
-            showBatchJsonFallback_(events, 'Not connected to a live backend.');
+    function renderGantt_(){
+        renderAxis_();
+        const wrap = document.getElementById('gantt-rows');
+        if(!FILTERED_COHORTS.length){
+            wrap.innerHTML = '<div class="empty-note">' + (LIVE_MODE ? 'No cohorts match the current filters.' : 'Connect to the Apps Script backend to load COHORT_MASTER.') + '</div>';
             return;
         }
-        try {
-            // 'add-planting-events' (DateEngine.gs) -- NOT 'generate-planting-events',
-            // which is already wired to a different, year-wide CROP_PLANTING_RULES
-            // expansion with an incompatible payload shape. See DateEngine.gs's
-            // handleAddPlantingEvents_ header comment for why these stay separate.
-            const res = await callApi_(APPS_SCRIPT_URL, 'add-planting-events', { managerId, events });
-            if(!res.success) throw new Error(res.error || 'Server rejected the request.');
-            await connectLive(APPS_SCRIPT_URL, { silent: true });
-            switchTab_('events');
-        } catch(err){
-            showBatchJsonFallback_(events, err.message);
-        }
-    });
-
-    function showBatchJsonFallback_(events, reason){
-        const wrap = document.getElementById('batch-json-wrap');
-        const ta = document.getElementById('batch-json');
-        wrap.classList.remove('hidden');
-        ta.value = JSON.stringify({ action: 'add-planting-events', payload: { events } }, null, 2);
-        document.getElementById('batch-error').textContent = 'Could not save automatically (' + reason + '). Payload below -- run it once DateEngine.gs\'s add-planting-events action is deployed, or paste into Apps Script directly.';
+        const sorted = FILTERED_COHORTS.slice().sort((a,b) => {
+            const as = a.startDate ? a.startDate.getTime() : Infinity;
+            const bs = b.startDate ? b.startDate.getTime() : Infinity;
+            return as - bs;
+        });
+        wrap.innerHTML = sorted.map(c => {
+            const hasDates = !!(c.startDate && c.endDate);
+            let barStyle = '';
+            let hwHtml = '';
+            if(hasDates){
+                const left = pctForDate_(c.startDate);
+                const right = pctForDate_(c.endDate);
+                const width = Math.max(right - left, 0.6);
+                barStyle = `left:${left}%; width:${width}%; background:${c.color}33; border-color:${c.color};`;
+                if(c.hwStart && c.hwEnd){
+                    const hwLeftAbs = pctForDate_(c.hwStart);
+                    const hwRightAbs = pctForDate_(c.hwEnd);
+                    // convert to % relative to the bar itself
+                    const barSpan = right - left || 1;
+                    const hwLeftRel = Math.max(0, ((hwLeftAbs - left) / barSpan) * 100);
+                    const hwWidthRel = Math.max(((hwRightAbs - hwLeftAbs) / barSpan) * 100, 2);
+                    hwHtml = `<div class="gantt-bar-hw" style="left:${hwLeftRel}%; width:${hwWidthRel}%; background:${c.color};"></div>`;
+                }
+            } else {
+                barStyle = 'left:1%; width:14%;';
+            }
+            const facIcon = c.facility ? (FACILITY_ICON[c.facility] || '') : '';
+            return `
+            <div class="gantt-row">
+                <div class="gantt-label">
+                    <div class="gl-top">${c.cohortId || '—'} <span class="gl-crop-code">${c.cropId || ''}</span></div>
+                    <div class="gl-sub">${c.variety || ''}</div>
+                </div>
+                <div class="gantt-track">
+                    <div class="gantt-bar${hasDates?'':' no-dates'}" style="${barStyle}"
+                         data-cohort="${c.cohortId}"
+                         onmouseenter="showGanttTooltip_(event, '${c.cohortId}')"
+                         onmousemove="moveGanttTooltip_(event)"
+                         onmouseleave="hideGanttTooltip_()"
+                         onclick="openCohortPanel_('${c.cohortId}')">
+                        ${hwHtml}
+                        <span class="gantt-bar-badge badge-${c.badge}">${c.badge}</span>
+                        <span class="gantt-bar-facility">${facIcon}</span>
+                    </div>
+                </div>
+                <div class="gantt-block-tag">${c.blockId || '—'}</div>
+            </div>`;
+        }).join('');
     }
 
-    /* ---------------------------- TABS ---------------------------- */
-    function switchTab_(view){
-        document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
-        document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
+    /* ---------------------------- TOOLTIP ---------------------------- */
+    function findCohort_(id){ return FILTERED_COHORTS.find(c => c.cohortId === id) || ALL_COHORTS.find(c => c.cohortId === id); }
+    function showGanttTooltip_(evt, cohortId){
+        const c = findCohort_(cohortId);
+        if(!c) return;
+        const tt = document.getElementById('gantt-tooltip');
+        tt.innerHTML = `<b>${c.cohortId} <span style="color:var(--text-muted); font-weight:400;">${c.cropId||''}</span></b>
+            <div class="tt-row">Start: <span>${fmtDate_(c.startDate)}</span></div>
+            <div class="tt-row">Harvest window: <span>${fmtDate_(c.hwStart)} → ${fmtDate_(c.hwEnd)}</span></div>
+            <div class="tt-row">End: <span>${fmtDate_(c.endDate)}</span></div>
+            <div class="tt-row">Facility: <span>${c.facility || '—'}</span></div>
+            <div class="tt-row">Block: <span>${c.blockId || '—'}${c.bedRange ? ' (' + c.bedRange + ')' : ''}</span></div>`;
+        tt.style.display = 'block';
+        moveGanttTooltip_(evt);
     }
-    document.getElementById('tab-bar').addEventListener('click', (e) => {
-        const btn = e.target.closest('.tab-btn');
-        if(!btn) return;
-        switchTab_(btn.dataset.view);
-    });
+    function moveGanttTooltip_(evt){
+        const tt = document.getElementById('gantt-tooltip');
+        const pad = 14;
+        let x = evt.clientX + pad, y = evt.clientY + pad;
+        if(x + 270 > window.innerWidth) x = evt.clientX - 270 - pad;
+        if(y + 140 > window.innerHeight) y = evt.clientY - 140 - pad;
+        tt.style.left = x + 'px'; tt.style.top = y + 'px';
+    }
+    function hideGanttTooltip_(){ document.getElementById('gantt-tooltip').style.display = 'none'; }
+
+    /* ---------------------------- SIDE PANEL ---------------------------- */
+    function openCohortPanel_(cohortId){
+        const c = findCohort_(cohortId);
+        if(!c) return;
+        document.getElementById('panel-title').textContent = c.cropId || '—';
+        document.getElementById('panel-code').textContent = c.cohortId || '';
+        document.getElementById('panel-sub').textContent = c.variety ? ('Variety: ' + c.variety) : '';
+        document.getElementById('panel-badge-wrap').innerHTML = `<span class="panel-badge badge-${c.badge}">${c.badge} · ${c.state || '—'}</span>`;
+        document.getElementById('panel-kv').innerHTML = `
+            <div><div class="k">Cohort ID</div><div class="v">${c.cohortId || '—'}</div></div>
+            <div><div class="k">Crop ID</div><div class="v">${c.cropId || '—'}</div></div>
+            <div><div class="k">Start Date</div><div class="v">${fmtDate_(c.startDate)}</div></div>
+            <div><div class="k">Harvest Start</div><div class="v">${fmtDate_(c.hwStart)}</div></div>
+            <div><div class="k">Harvest End</div><div class="v">${fmtDate_(c.hwEnd)}</div></div>
+            <div><div class="k">End Date</div><div class="v">${fmtDate_(c.endDate)}</div></div>
+            <div><div class="k">Facility</div><div class="v">${c.facility || '—'}</div></div>
+            <div><div class="k">Block ID</div><div class="v">${c.blockId || '—'}</div></div>
+            <div><div class="k">Bed Range</div><div class="v">${c.bedRange || '—'}</div></div>
+            <div><div class="k">Status</div><div class="v">${c.state || '—'}</div></div>`;
+        document.getElementById('panel-overlay').classList.add('open');
+    }
+    function closeCohortPanel_(){ document.getElementById('panel-overlay').classList.remove('open'); }
+    document.getElementById('panel-close-btn').addEventListener('click', closeCohortPanel_);
+    document.getElementById('panel-overlay').addEventListener('click', (e) => { if(e.target.id === 'panel-overlay') closeCohortPanel_(); });
 
     /* ------------------------ WIRE UP STATIC UI ------------------------ */
     document.getElementById('login-submit-btn').addEventListener('click', performLogin_);
