@@ -449,9 +449,30 @@
         Prep: 'PLANNED', Planted: 'PLANNED',
         Growing: 'ACTIVE',
         Harvestable: 'HARVESTING',
-        Harvested: 'COMPLETE', Cleanup: 'COMPLETE', Rest: 'COMPLETE'
+        Harvested: 'COMPLETE', Cleanup: 'COMPLETE'
+        // Rest is deliberately NOT in this table -- see badgeForState_ below.
     };
-    function badgeForState_(state){ return STATE_BADGE_MAP[state] || 'PLANNED'; }
+    // 'Rest' is overloaded in COHORT_MASTER.Current_State: createCohort_
+    // (Database.gs) initializes EVERY brand-new cohort to 'Rest' as an
+    // "unverified / not yet planted" sentinel -- lockCohortPlanting_'s own
+    // guard checks Current_State === 'Rest' for exactly that reason -- but
+    // 'Rest' is ALSO the final stage of the real 7-stage
+    // FIELD_STATE_SEQUENCE (Prep -> Planted -> Growing -> Harvestable ->
+    // Harvested -> Cleanup -> Rest), meaning "finished its full cycle, bed
+    // now fallow." Same string, opposite meanings, depending on whether the
+    // cohort has actually been planted yet. Actual_Planting_Date is only
+    // ever written by the Verify & Lock DOB flow (lockCohortPlanting_,
+    // DashboardAPI.gs) the first time a cohort leaves its initial Rest, so
+    // its presence -- not the state string alone -- is what distinguishes
+    // "really done" Rest from "not started yet" Rest. Confirmed against the
+    // live workbook (2026-09-13): all 185 cohorts sit at Current_State
+    // 'Rest' with Actual_Planting_Date blank -- none have actually been
+    // planted -- which is why the old state-only lookup badged every single
+    // one COMPLETE regardless of planting date.
+    function badgeForState_(state, actualPlantingDate){
+        if(state === 'Rest'){ return actualPlantingDate ? 'COMPLETE' : 'PLANNED'; }
+        return STATE_BADGE_MAP[state] || 'PLANNED';
+    }
 
     const CROP_COLOR_PALETTE = ['#4fc3f7','#81c784','#ffb74d','#ba68c8','#f06292','#a1887f','#90a4ae','#dce775','#4db6ac','#ff8a65','#7986cb','#aed581'];
     function colorForCrop_(cropId){
@@ -476,7 +497,7 @@
             startDate, endDate, hwStart, hwEnd,
             facility: facilityForBlock_(blockId),
             state: c.Current_State || null,
-            badge: badgeForState_(c.Current_State),
+            badge: badgeForState_(c.Current_State, c.Actual_Planting_Date),
             color: colorForCrop_(c.Crop_ID)
         };
     }
